@@ -15,6 +15,7 @@ pub struct LauncherDirectories {
     pub runtime_base_dir: Arc<Path>,
 
     pub content_library_dir: Arc<Path>,
+    pub content_meta_dir: Arc<Path>,
 
     pub temp_dir: Arc<Path>,
     pub temp_natives_base_dir: Arc<Path>,
@@ -40,6 +41,7 @@ impl LauncherDirectories {
         let runtime_base_dir = launcher_dir.join("runtime");
 
         let content_library_dir = launcher_dir.join("contentlibrary");
+        let content_meta_dir = launcher_dir.join("contentmeta");
 
         let temp_dir = launcher_dir.join("temp");
         let temp_natives_base_dir = temp_dir.join("natives");
@@ -61,6 +63,7 @@ impl LauncherDirectories {
             runtime_base_dir: runtime_base_dir.into(),
 
             content_library_dir: content_library_dir.into(),
+            content_meta_dir: content_meta_dir.into(),
 
             temp_dir: temp_dir.into(),
             temp_natives_base_dir: temp_natives_base_dir.into(),

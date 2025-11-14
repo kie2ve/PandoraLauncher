@@ -1,42 +1,81 @@
 use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Cursor, Read},
-    sync::Arc,
+    collections::HashMap, fs::File, io::{Cursor, Read}, path::{Path, PathBuf}, sync::Arc
 };
 
 use bridge::instance::ModSummary;
 use image::imageops::FilterType;
-use serde::Deserialize;
+use rustc_hash::FxHashMap;
+use schema::content::ContentSource;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DeserializeAs, SerializeAs};
 use sha1::{Digest, Sha1};
 use std::sync::RwLock;
 use zip::read::ZipFile;
 
-#[derive(Default)]
 pub struct ModMetadataManager {
-    by_hash: RwLock<HashMap<[u8; 20], Option<Arc<ModSummary>>>>,
+    _content_meta_dir: Arc<Path>,
+    sources_json: PathBuf,
+    by_hash: RwLock<FxHashMap<[u8; 20], Option<Arc<ModSummary>>>>,
+    content_sources: RwLock<FxHashMap<[u8; 20], ContentSource>>,
 }
 
 impl ModMetadataManager {
+    pub fn load(content_meta_dir: Arc<Path>) -> Self {
+        let sources_json = content_meta_dir.join("sources.json");
+
+        let content_sources = if let Ok(data) = std::fs::read(&sources_json) {
+            let content_sources = serde_json::from_slice(&data);
+            content_sources.map(|v: DeserializedContentSources| v.0).unwrap_or_default()
+        } else {
+            Default::default()
+        };
+
+        Self {
+            _content_meta_dir: content_meta_dir,
+            sources_json,
+            by_hash: Default::default(),
+            content_sources: RwLock::new(content_sources),
+        }
+    }
+
+    pub fn set_content_sources(&self, sources: impl Iterator<Item = ([u8; 20], ContentSource)>) {
+        let mut content_sources = self.content_sources.write().unwrap();
+
+        let mut changed = false;
+        for (hash, source) in sources {
+            let old = content_sources.insert(hash, source);
+            if old != Some(source) {
+                changed = true;
+            }
+        }
+
+        if changed {
+            let serialized = SerializedContentSources(&content_sources);
+            if let Ok(content) = serde_json::to_vec(&serialized) {
+                let _ = crate::write_safe(&self.sources_json, &content);
+            }
+        }
+    }
+
     pub fn get(&self, file: &mut std::fs::File) -> Option<Arc<ModSummary>> {
         let mut hasher = Sha1::new();
         let _ = std::io::copy(file, &mut hasher).ok()?;
         let actual_hash: [u8; 20] = hasher.finalize().into();
 
-        // todo: cache on disk! (but only when we need to store additional metadata like source)
+        // todo: cache on disk?
 
         if let Some(summary) = self.by_hash.read().unwrap().get(&actual_hash) {
             return summary.clone();
         }
 
-        let summary = Self::load(file);
+        let summary = Self::load_mod_summary(file);
 
         self.by_hash.write().unwrap().insert(actual_hash, summary.clone());
 
         summary
     }
 
-    pub fn load(file: &mut std::fs::File) -> Option<Arc<ModSummary>> {
+    fn load_mod_summary(file: &mut std::fs::File) -> Option<Arc<ModSummary>> {
         let mut archive = zip::ZipArchive::new(file).ok()?;
         let file = match archive.by_name("fabric.mod.json") {
             Ok(file) => file,
@@ -162,5 +201,39 @@ impl Person {
             Person::Name(name) => name,
             Person::NameAndContact { name, .. } => name,
         }
+    }
+}
+
+#[serde_as]
+#[derive(Serialize)]
+struct SerializedContentSources<'a>(
+    #[serde_as(as = "FxHashMap<SerializeAsHex, _>")]
+    &'a FxHashMap<[u8; 20], ContentSource>
+);
+
+struct SerializeAsHex {}
+
+impl SerializeAs<[u8; 20]> for SerializeAsHex {
+    fn serialize_as<S>(source: &[u8; 20], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        hex::serde::serialize(source, serializer)
+    }
+}
+
+#[serde_as]
+#[derive(Deserialize)]
+struct DeserializedContentSources(
+    #[serde_as(as = "FxHashMap<DeserializeAsHex, _>")]
+    FxHashMap<[u8; 20], ContentSource>
+);
+
+struct DeserializeAsHex {}
+
+impl<'de> DeserializeAs<'de, [u8; 20]> for DeserializeAsHex {
+    fn deserialize_as<D>(deserializer: D) -> Result<[u8; 20], D::Error>
+    where
+        D: serde::Deserializer<'de> {
+        hex::serde::deserialize(deserializer)
     }
 }

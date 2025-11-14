@@ -35,11 +35,9 @@ use crate::{
     directories::LauncherDirectories,
     instance::Instance,
     launch_wrapper,
-    metadata::manager::{
-        AssetsIndexMetadata, FabricLaunchMetadata, FabricLoaderManifestMetadata, MetaLoadError, MetadataManager,
-        MinecraftVersionManifestMetadata, MinecraftVersionMetadata, MojangJavaRuntimeComponentMetadata,
-        MojangJavaRuntimesMetadata,
-    },
+    metadata::{items::{AssetsIndexMetadataItem, FabricLaunchMetadataItem, FabricLoaderManifestMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem}, manager::{
+        MetaLoadError, MetadataManager,
+    }},
 };
 
 pub struct Launcher {
@@ -208,9 +206,9 @@ impl Launcher {
         }
 
         let launch_context = LaunchContext {
-            java_path: java_path.into(),
-            natives_dir: natives_dir.into(),
-            game_dir: game_dir.into(),
+            java_path,
+            natives_dir,
+            game_dir,
             assets_root: self.directories.assets_root_dir.clone(),
             temp_dir: self.directories.temp_dir.clone(),
             assets_index_name,
@@ -242,7 +240,7 @@ impl Launcher {
                 launch_tracker.add_total(1);
                 launch_tracker.notify().await;
 
-                let versions = self.meta.fetch(&MinecraftVersionManifestMetadata).await?;
+                let versions = self.meta.fetch(&MinecraftVersionManifestMetadataItem).await?;
 
                 launch_tracker.add_count(1);
                 launch_tracker.notify().await;
@@ -251,12 +249,12 @@ impl Launcher {
                     return Err(LaunchError::CantFindVersion(instance.version.as_str()));
                 };
 
-                Ok(self.meta.fetch(&MinecraftVersionMetadata(version)).await?)
+                Ok(self.meta.fetch(&MinecraftVersionMetadataItem(version)).await?)
             },
             Loader::Fabric => {
-                let versions = self.meta.fetch(&MinecraftVersionManifestMetadata).map_err(LaunchError::from);
+                let versions = self.meta.fetch(&MinecraftVersionManifestMetadataItem).map_err(LaunchError::from);
 
-                let fabric_loader_versions = self.meta.fetch(&FabricLoaderManifestMetadata).map_err(LaunchError::from);
+                let fabric_loader_versions = self.meta.fetch(&FabricLoaderManifestMetadataItem).map_err(LaunchError::from);
 
                 launch_tracker.add_total(4);
                 launch_tracker.notify().await;
@@ -273,7 +271,7 @@ impl Launcher {
                         latest_loader_version = loader_manifest.0.first();
                     }
 
-                    let value = meta2.fetch(&FabricLaunchMetadata {
+                    let value = meta2.fetch(&FabricLaunchMetadataItem {
                         minecraft_version,
                         loader_version: latest_loader_version.unwrap().version,
                     }).await?;
@@ -295,7 +293,7 @@ impl Launcher {
                         return Err(LaunchError::CantFindVersion(instance_version.as_str()));
                     };
 
-                    let value = meta3.fetch(&MinecraftVersionMetadata(version)).await?;
+                    let value = meta3.fetch(&MinecraftVersionMetadataItem(version)).await?;
 
                     launch_tracker3.add_count(1);
                     launch_tracker3.notify().await;
@@ -420,7 +418,7 @@ impl Launcher {
 
         let fresh_install = !runtime_component_dir.exists();
 
-        let runtimes = meta.fetch(&MojangJavaRuntimesMetadata).await?;
+        let runtimes = meta.fetch(&MojangJavaRuntimesMetadataItem).await?;
 
         let runtime_platform = runtimes.platforms.get(&platform).ok_or(LoadJavaRuntimeError::UnknownPlatform)?;
         let runtime_components = runtime_platform
@@ -429,7 +427,7 @@ impl Launcher {
             .ok_or(LoadJavaRuntimeError::UnknownComponentForPlatform)?;
         let runtime_component = runtime_components.first().ok_or(LoadJavaRuntimeError::UnknownComponentForPlatform)?;
 
-        let runtime = meta.fetch(&MojangJavaRuntimeComponentMetadata {
+        let runtime = meta.fetch(&MojangJavaRuntimeComponentMetadataItem {
             url: runtime_component.manifest.url,
             cache: runtime_component_dir.join("manifest.json").into(),
             hash: runtime_component.manifest.sha1,
@@ -467,7 +465,7 @@ impl Launcher {
     ) -> Result<String, LoadAssetObjectsError> {
         let asset_index = format!("{}", version_info.assets);
 
-        let assets_index = meta.fetch(&AssetsIndexMetadata {
+        let assets_index = meta.fetch(&AssetsIndexMetadataItem {
             url: version_info.asset_index.url,
             cache: self.directories.assets_index_dir.join(format!("{}.json", &asset_index)).into(),
             hash: version_info.asset_index.sha1,
@@ -1367,9 +1365,9 @@ impl LaunchRuleContext {
 }
 
 pub struct LaunchContext {
-    pub java_path: Arc<Path>,
-    pub natives_dir: Arc<Path>,
-    pub game_dir: Arc<Path>,
+    pub java_path: PathBuf,
+    pub natives_dir: PathBuf,
+    pub game_dir: PathBuf,
     pub assets_root: Arc<Path>,
     pub temp_dir: Arc<Path>,
     pub assets_index_name: String,

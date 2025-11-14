@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
+
+use schema::content::ContentSource;
 
 use crate::instance::InstanceID;
 
@@ -25,9 +27,20 @@ pub struct ContentInstall {
 
 #[derive(Debug, Clone)]
 pub struct ContentInstallFile {
-    pub url: Arc<str>,
-    pub filename: Arc<str>,
-    pub sha1: Arc<str>,
-    pub size: usize,
+    pub download: ContentDownload,
     pub content_type: ContentType,
+    pub content_source: ContentSource,
+}
+
+#[derive(Debug, Clone)]
+pub enum ContentDownload {
+    Url {
+        url: Arc<str>,
+        filename: Arc<str>,
+        sha1: Arc<str>,
+        size: usize,
+    },
+    File {
+        path: PathBuf,
+    }
 }

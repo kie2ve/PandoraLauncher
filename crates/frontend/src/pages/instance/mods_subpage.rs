@@ -1,30 +1,24 @@
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering}, Arc
 };
 
 use bridge::{
-    handle::BackendHandle,
-    instance::{InstanceID, InstanceModSummary},
-    message::{AtomicBridgeDataLoadState, MessageToBackend},
+    handle::BackendHandle, install::{ContentDownload, ContentInstall, ContentInstallFile, ContentType, InstallTarget}, instance::{InstanceID, InstanceModSummary}, keep_alive::KeepAliveHandle, message::{AtomicBridgeDataLoadState, MessageToBackend}
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, IndexPath, Sizable,
-    button::{Button, ButtonVariants},
-    h_flex,
-    list::{ListDelegate, ListItem, ListState},
-    switch::Switch,
-    v_flex,
+    button::{Button, ButtonVariants}, h_flex, list::{ListDelegate, ListItem, ListState}, notification::{Notification, NotificationType}, switch::Switch, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable, WindowExt
 };
+use schema::content::ContentSource;
 
-use crate::{entity::instance::InstanceEntry, png_render_cache};
+use crate::{entity::instance::InstanceEntry, png_render_cache, root::LauncherRootGlobal};
 
 pub struct InstanceModsSubpage {
     instance: InstanceID,
     backend_handle: BackendHandle,
     mods_state: Arc<AtomicBridgeDataLoadState>,
     mod_list: Entity<ListState<ModsListDelegate>>,
+    checking_for_updates: Option<KeepAliveHandle>,
 }
 
 impl InstanceModsSubpage {
@@ -67,6 +61,7 @@ impl InstanceModsSubpage {
             backend_handle,
             mods_state,
             mod_list,
+            checking_for_updates: None,
         }
     }
 }
@@ -80,14 +75,87 @@ impl Render for InstanceModsSubpage {
             self.backend_handle.blocking_send(MessageToBackend::RequestLoadMods { id: self.instance });
         }
 
+        let update_label = if self.checking_for_updates.is_some() {
+            "Checking for updates..."
+        } else {
+            "Check for updates"
+        };
+
         let header = h_flex()
             .gap_4()
             .mb_1()
             .ml_1()
             .child(div().text_lg().underline().child("Mods"))
-            .child(Button::new("update").label("Check for updates").success().compact().small())
-            .child(Button::new("addmr").label("Add from Modrinth").success().compact().small())
-            .child(Button::new("addfile").label("Add from file").success().compact().small());
+            .child(Button::new("update").label(update_label).loading(self.checking_for_updates.is_some()).success().compact().small().on_click({
+                cx.listener(move |this, _, _, _| {
+                    todo!();
+                    // if this.checking_for_updates.is_none() {
+                    //     let keep_alive = KeepAlive::new();
+                    //     let handle = keep_alive.create_handle();
+                    //     this.checking_for_updates = Some(handle);
+                    //     forget(keep_alive);
+                    // }
+                })
+            }))
+            .child(Button::new("addmr").label("Add from Modrinth").success().compact().small().on_click({
+                let instance = self.instance;
+                move |_, window, cx| {
+                    cx.update_global::<LauncherRootGlobal, ()>(|global, cx| {
+                        global.root.update(cx, |launcher_root, cx| {
+                            launcher_root.ui.update(cx, |ui, cx| {
+                                ui.switch_page(crate::ui::PageType::Modrinth { installing_for: Some(instance) }, window, cx);
+                            });
+                        });
+                    });
+
+                }
+            }))
+            .child(Button::new("addfile").label("Add from file").success().compact().small().on_click({
+                let backend_handle = self.backend_handle.clone();
+                let instance = self.instance;
+                move |_, window, cx| {
+                    let receiver = cx.prompt_for_paths(PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: true,
+                        prompt: Some("Select mods to install".into())
+                    });
+                    // todo: store future instead of detaching
+
+                    let backend_handle = backend_handle.clone();
+                    window.spawn(cx, async move |cx| {
+                        let Ok(result) = receiver.await else {
+                            return;
+                        };
+                        _ = cx.update(move |window, cx| {
+                            match result {
+                                Ok(Some(paths)) => {
+                                    let content_install = ContentInstall {
+                                        target: InstallTarget::Instance(instance),
+                                        files: paths.into_iter().map(|path| {
+                                            ContentInstallFile {
+                                                download: ContentDownload::File { path },
+                                                content_type: ContentType::Mod,
+                                                content_source: ContentSource::Manual,
+                                            }
+                                        }).collect(),
+                                    };
+                                    crate::root::start_install(content_install, &backend_handle, window, cx);
+                                },
+                                Ok(None) => {},
+                                Err(error) => {
+                                    let error = format!("{}", error);
+                                    let notification = Notification::new()
+                                        .autohide(false)
+                                        .with_type(NotificationType::Error)
+                                        .title(error);
+                                    window.push_notification(notification, cx);
+                                },
+                            }
+                        });
+                    }).detach();
+                }
+            }));
 
         v_flex().p_4().size_full().child(header).child(
             div()

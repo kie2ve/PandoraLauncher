@@ -8,7 +8,7 @@ use bridge::{
     modal_action::ModalAction,
 };
 use gpui::{prelude::*, *};
-use gpui_component::{Root, v_flex};
+use gpui_component::v_flex;
 
 use crate::{entity::DataEntities, modals, ui::LauncherUI};
 
@@ -42,7 +42,7 @@ impl LauncherRoot {
 }
 
 impl Render for LauncherRoot {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(message) = &*self.panic_message.read().unwrap() {
             return v_flex().size_full().bg(gpui::blue()).child(message.clone());
         }

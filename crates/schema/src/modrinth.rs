@@ -4,35 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-#[derive(thiserror::Error, Debug, Clone)]
-pub enum ModrinthError {
-    #[error("Error connecting to modrinth")]
-    ClientRequestError,
-    #[error("Error deserializing result from modrinth")]
-    DeserializeError,
-    #[error("Descriptive error from modrinth")]
-    ModrinthResponse(ModrinthErrorResponse),
-    #[error("Non-OK response from modrinth")]
-    NonOK(u16),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModrinthErrorResponse {
-    pub error: Arc<str>,
-    pub description: Arc<str>,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ModrinthRequest {
-    Search(ModrinthSearchRequest),
-    ProjectVersions(ModrinthProjectVersionsRequest),
-}
-
-#[derive(Debug, Clone)]
-pub enum ModrinthResult {
-    Search(ModrinthSearchResult),
-    ProjectVersions(ModrinthProjectVersionsResult),
-}
+pub const MODRINTH_SEARCH_URL: &str = "https://api.modrinth.com/v2/search";
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct ModrinthSearchRequest {

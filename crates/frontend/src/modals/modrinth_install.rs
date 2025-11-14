@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, sync::Arc};
 
-use bridge::install::{ContentInstall, ContentInstallFile, ContentType, InstallTarget};
+use bridge::{install::{ContentDownload, ContentInstall, ContentInstallFile, ContentType, InstallTarget}, instance::InstanceID, meta::MetadataRequest};
 use enumset::EnumSet;
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -15,29 +15,18 @@ use gpui_component::{
 };
 use rustc_hash::FxHashMap;
 use schema::{
-    loader::Loader,
-    modrinth::{
-        ModrinthLoader, ModrinthProjectVersion, ModrinthProjectVersionsRequest, ModrinthRequest, ModrinthVersionStatus,
-        ModrinthVersionType,
-    },
+    content::ContentSource, loader::Loader, modrinth::{
+        ModrinthLoader, ModrinthProjectVersion, ModrinthProjectVersionsRequest, ModrinthProjectVersionsResult, ModrinthVersionStatus, ModrinthVersionType
+    }
 };
 
 use crate::{
     component::{error_alert::ErrorAlert, instance_dropdown::InstanceDropdown},
     entity::{
-        DataEntities,
-        instance::InstanceEntry,
-        modrinth::{FrontendModrinthData, FrontendModrinthDataState},
+        instance::InstanceEntry, metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult, FrontendMetadataState}, DataEntities
     },
     root,
 };
-
-pub struct InstallDialogLoading {
-    name: SharedString,
-    project_versions: Entity<FrontendModrinthDataState>,
-    data: DataEntities,
-    content_type: ContentType,
-}
 
 struct VersionMatrixLoaders {
     loaders: EnumSet<ModrinthLoader>,
@@ -69,169 +58,223 @@ struct InstallDialog {
     mod_version_select_state: Option<Entity<SelectState<SearchableVec<ModVersionItem>>>>,
 }
 
-impl InstallDialogLoading {
-    pub fn new(
-        name: &str,
-        project_id: Arc<str>,
-        content_type: ContentType,
-        data: &DataEntities,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> Self {
-        let project_versions = FrontendModrinthData::request(
-            &data.modrinth,
-            ModrinthRequest::ProjectVersions(ModrinthProjectVersionsRequest { project_id }),
-            cx,
-        );
+pub fn open(
+    name: &str,
+    project_id: Arc<str>,
+    content_type: ContentType,
+    install_for: Option<InstanceID>,
+    data: &DataEntities,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let title = SharedString::new(format!("Install {}", name));
 
-        Self {
-            name: SharedString::new(format!("Install {}", name)),
-            project_versions,
-            data: data.clone(),
-            content_type,
-        }
-    }
+    let project_versions = FrontendMetadata::request(
+        &data.metadata,
+        MetadataRequest::ModrinthProjectVersions(ModrinthProjectVersionsRequest { project_id }),
+        cx,
+    );
 
-    pub fn show(self, window: &mut Window, cx: &mut App) {
-        let install_dialog = cx.new(|_| self);
-        window.open_dialog(cx, move |modal, window, cx| {
-            install_dialog.update(cx, |this, cx| this.render(modal, window, cx))
-        });
-    }
+    open_from_entity(title, project_versions, content_type, install_for, data.clone(), window, cx);
+}
 
-    fn render(&mut self, modal: Dialog, window: &mut Window, cx: &mut Context<Self>) -> Dialog {
-        let modal = modal.title(self.name.clone());
+fn open_from_entity(
+    title: SharedString,
+    project_versions: Entity<FrontendMetadataState>,
+    content_type: ContentType,
+    install_for: Option<InstanceID>,
+    data: DataEntities,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let result: FrontendMetadataResult<ModrinthProjectVersionsResult> = project_versions.read(cx).result();
+    match result {
+        FrontendMetadataResult::Loading => {
+            let title2 = title.clone();
+            let _subscription = window.observe(&project_versions, cx, move |project_versions, window, cx| {
+                window.close_all_dialogs(cx);
+                open_from_entity(title2.clone(), project_versions, content_type, install_for, data.clone(), window, cx);
+            });
+            window.open_dialog(cx, move |dialog, _, _| {
+                let _ = &_subscription;
+                dialog.title(title.clone()).child(h_flex().gap_2().child("Loading mod versions...").child(Spinner::new()))
+            });
+        },
+        FrontendMetadataResult::Loaded(versions) => {
+            let mut valid_project_versions = Vec::with_capacity(versions.0.len());
 
-        let project_versions = self.project_versions.read(cx);
-        match project_versions {
-            FrontendModrinthDataState::Loading => {
-                modal.child(h_flex().gap_2().child("Loading versions...").child(Spinner::new()))
-            },
-            FrontendModrinthDataState::Loaded { result, .. } => match result {
-                Ok(schema::modrinth::ModrinthResult::ProjectVersions(versions)) => {
-                    let mut valid_project_versions = Vec::with_capacity(versions.0.len());
+            let mut version_matrix: FxHashMap<&'static str, VersionMatrixLoaders> = FxHashMap::default();
+            for version in versions.0.iter() {
+                let Some(loaders) = version.loaders.clone() else {
+                    continue;
+                };
+                let Some(game_versions) = &version.game_versions else {
+                    continue;
+                };
+                if version.files.is_empty() {
+                    continue;
+                }
+                if let Some(status) = version.status
+                    && !matches!(status, ModrinthVersionStatus::Listed | ModrinthVersionStatus::Archived)
+                {
+                    continue;
+                }
 
-                    let mut version_matrix: FxHashMap<&'static str, VersionMatrixLoaders> = FxHashMap::default();
-                    for version in versions.0.iter() {
-                        let Some(loaders) = version.loaders.clone() else {
-                            continue;
-                        };
-                        let Some(game_versions) = &version.game_versions else {
-                            continue;
-                        };
-                        if version.files.is_empty() {
-                            continue;
-                        }
-                        if let Some(status) = version.status
-                            && !matches!(status, ModrinthVersionStatus::Listed | ModrinthVersionStatus::Archived)
-                        {
-                            continue;
-                        }
+                let mut loaders = EnumSet::from_iter(loaders.iter().copied());
+                loaders.remove(ModrinthLoader::Unknown);
+                if loaders.is_empty() {
+                    continue;
+                }
 
-                        let mut loaders = EnumSet::from_iter(loaders.iter().copied());
-                        loaders.remove(ModrinthLoader::Unknown);
-                        if loaders.is_empty() {
-                            continue;
-                        }
+                valid_project_versions.push(version.clone());
 
-                        valid_project_versions.push(version.clone());
-
-                        for game_version in game_versions.iter() {
-                            match version_matrix.entry(game_version.as_str()) {
-                                std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
-                                    occupied_entry.get_mut().same_loaders_for_all_versions &=
-                                        occupied_entry.get().loaders == loaders;
-                                    occupied_entry.get_mut().loaders |= loaders;
-                                },
-                                std::collections::hash_map::Entry::Vacant(vacant_entry) => {
-                                    vacant_entry.insert(VersionMatrixLoaders {
-                                        loaders,
-                                        same_loaders_for_all_versions: true,
-                                    });
-                                },
-                            }
-                        }
+                for game_version in game_versions.iter() {
+                    match version_matrix.entry(game_version.as_str()) {
+                        std::collections::hash_map::Entry::Occupied(mut occupied_entry) => {
+                            occupied_entry.get_mut().same_loaders_for_all_versions &=
+                                occupied_entry.get().loaders == loaders;
+                            occupied_entry.get_mut().loaders |= loaders;
+                        },
+                        std::collections::hash_map::Entry::Vacant(vacant_entry) => {
+                            vacant_entry.insert(VersionMatrixLoaders {
+                                loaders,
+                                same_loaders_for_all_versions: true,
+                            });
+                        },
                     }
+                }
+            }
 
-                    let instance_entries = self.data.instances.clone();
+            if version_matrix.is_empty() {
+                open_error_dialog(title.clone(), "No mod versions found".into(), window, cx);
+                return;
+            }
+            if let Some(install_for) = install_for {
+                let Some(instance) = data.instances.read(cx).entries.get(&install_for) else {
+                    open_error_dialog(title.clone(), "Unable to find instance".into(), window, cx);
+                    return;
+                };
 
-                    let entries: Arc<[InstanceEntry]> = instance_entries
-                        .read(cx)
-                        .entries
-                        .iter()
-                        .rev()
-                        .filter_map(|(_, instance)| {
-                            let instance = instance.read(cx);
+                let instance = instance.read(cx);
 
-                            if let Some(loaders) = version_matrix.get(instance.version.as_str()) {
-                                let mut valid_loader = true;
-                                if self.content_type == ContentType::Mod || self.content_type == ContentType::Modpack {
-                                    valid_loader = instance.loader == Loader::Vanilla
-                                        || loaders.loaders.contains(instance.loader.as_modrinth_loader());
-                                }
-                                if valid_loader {
-                                    return Some(instance.clone());
-                                }
+                let Some(loaders) = version_matrix.get(instance.version.as_str()) else {
+                    let error_message = SharedString::from(&format!("No mod versions found for {}", instance.version));
+                    open_error_dialog(title.clone(), error_message, window, cx);
+                    return;
+                };
+
+                let mut valid_loader = true;
+                if content_type == ContentType::Mod || content_type == ContentType::Modpack {
+                    valid_loader = instance.loader == Loader::Vanilla
+                        || loaders.loaders.contains(instance.loader.as_modrinth_loader());
+                }
+                if !valid_loader {
+                    let error_message = SharedString::from(&format!("No mod versions found for {} {}", instance.loader.name(), instance.version));
+                    open_error_dialog(title.clone(), error_message, window, cx);
+                    return;
+                }
+
+                let title = title.clone();
+                let instance_id = instance.id;
+                let fixed_minecraft_version = Some(instance.version.clone());
+                let fixed_loader = if (content_type == ContentType::Mod
+                    || content_type == ContentType::Modpack)
+                    && instance.loader != Loader::Vanilla
+                {
+                    Some(instance.loader.as_modrinth_loader())
+                } else {
+                    None
+                };
+                let install_dialog = InstallDialog {
+                    name: title,
+                    project_versions: valid_project_versions.into(),
+                    data,
+                    content_type,
+                    version_matrix,
+                    instances: None,
+                    unsupported_instances: 0,
+                    target: Some(InstallTarget::Instance(instance_id)),
+                    fixed_minecraft_version,
+                    minecraft_version_select_state: None,
+                    fixed_loader,
+                    loader_select_state: None,
+                    last_selected_minecraft_version: None,
+                    skip_loader_check_for_mod_version: false,
+                    mod_version_select_state: None,
+                    last_selected_loader: None,
+                };
+                install_dialog.show(window, cx);
+            } else {
+                let instance_entries = data.instances.clone();
+
+                let entries: Arc<[InstanceEntry]> = instance_entries
+                    .read(cx)
+                    .entries
+                    .iter()
+                    .rev()
+                    .filter_map(|(_, instance)| {
+                        let instance = instance.read(cx);
+
+                        if let Some(loaders) = version_matrix.get(instance.version.as_str()) {
+                            let mut valid_loader = true;
+                            if content_type == ContentType::Mod || content_type == ContentType::Modpack {
+                                valid_loader = instance.loader == Loader::Vanilla
+                                    || loaders.loaders.contains(instance.loader.as_modrinth_loader());
                             }
+                            if valid_loader {
+                                return Some(instance.clone());
+                            }
+                        }
 
-                            None
-                        })
-                        .collect();
-
-                    let unsupported_instances = instance_entries.read(cx).entries.len().saturating_sub(entries.len());
-                    let instances = if !entries.is_empty() {
-                        let dropdown = InstanceDropdown::create(entries, window, cx);
-                        dropdown.update(cx, |dropdown, cx| {
-                            dropdown.set_selected_index(Some(IndexPath::default()), window, cx)
-                        });
-                        Some(dropdown)
-                    } else {
                         None
-                    };
+                    })
+                    .collect();
 
-                    let name = self.name.clone();
-                    let data = self.data.clone();
-                    let content_type = self.content_type;
-                    cx.spawn_in(window, async move |_, cx| {
-                        _ = cx.update(move |window, cx| {
-                            window.close_dialog(cx);
-                            let install_dialog = InstallDialog {
-                                name,
-                                project_versions: valid_project_versions.into(),
-                                data,
-                                content_type,
-                                version_matrix,
-                                instances,
-                                unsupported_instances,
-                                target: None,
-                                fixed_minecraft_version: None,
-                                minecraft_version_select_state: None,
-                                fixed_loader: None,
-                                loader_select_state: None,
-                                last_selected_minecraft_version: None,
-                                skip_loader_check_for_mod_version: false,
-                                mod_version_select_state: None,
-                                last_selected_loader: None,
-                            };
-                            install_dialog.show(window, cx);
-                        });
-                    }).detach();
+                let unsupported_instances = instance_entries.read(cx).entries.len().saturating_sub(entries.len());
+                let instances = if !entries.is_empty() {
+                    let dropdown = InstanceDropdown::create(entries, window, cx);
+                    dropdown.update(cx, |dropdown, cx| {
+                        dropdown.set_selected_index(Some(IndexPath::default()), window, cx)
+                    });
+                    Some(dropdown)
+                } else {
+                    None
+                };
 
-                    modal.child(h_flex().gap_2().child("Loading mod versions...").child(Spinner::new()))
-                },
-                Ok(_) => modal.child(h_flex().child(ErrorAlert::new(
-                    0,
-                    "Error loading mod versions".into(),
-                    "Wrong result! Pandora bug!".into(),
-                ))),
-                Err(error) => modal.child(h_flex().child(ErrorAlert::new(
-                    0,
-                    "Error loading mod versions".into(),
-                    format!("{}", error).into(),
-                ))),
-            },
-        }
+                let title = title.clone();
+                let install_dialog = InstallDialog {
+                    name: title,
+                    project_versions: valid_project_versions.into(),
+                    data,
+                    content_type,
+                    version_matrix,
+                    instances,
+                    unsupported_instances,
+                    target: None,
+                    fixed_minecraft_version: None,
+                    minecraft_version_select_state: None,
+                    fixed_loader: None,
+                    loader_select_state: None,
+                    last_selected_minecraft_version: None,
+                    skip_loader_check_for_mod_version: false,
+                    mod_version_select_state: None,
+                    last_selected_loader: None,
+                };
+                install_dialog.show(window, cx);
+            }
+        },
+        FrontendMetadataResult::Error(message) => {
+            window.open_dialog(cx, move |modal, _, _| {
+                modal.title(title.clone()).child(ErrorAlert::new("error", "Error requesting from Modrinth".into(), message.clone()))
+            });
+        },
     }
+}
+
+fn open_error_dialog(title: SharedString, text: SharedString, window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |modal, _, _| {
+        modal.title(title.clone()).child(text.clone())
+    });
 }
 
 impl InstallDialog {
@@ -557,11 +600,14 @@ impl InstallDialog {
                             let content_install = ContentInstall {
                                 target: this.target.unwrap(),
                                 files: [ContentInstallFile {
-                                    url: install_file.url.clone(),
-                                    filename: install_file.filename.clone(),
-                                    sha1: install_file.hashes.sha1.clone(),
-                                    size: install_file.size,
+                                    download: ContentDownload::Url {
+                                        url: install_file.url.clone(),
+                                        filename: install_file.filename.clone(),
+                                        sha1: install_file.hashes.sha1.clone(),
+                                        size: install_file.size,
+                                    },
                                     content_type: this.content_type,
+                                    content_source: ContentSource::Modrinth,
                                 }]
                                 .into(),
                             };

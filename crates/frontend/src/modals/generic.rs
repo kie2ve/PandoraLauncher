@@ -105,11 +105,9 @@ pub fn show_modal(
             let elapsed = finished_at.elapsed().as_secs_f32();
             window.request_animation_frame();
             if elapsed >= 2.0 {
-                window.spawn(cx, async move |cx| {
-                    _ = cx.update(move |window, cx| {
-                        window.close_dialog(cx);
-                    });
-                }).detach();
+                window.defer(cx, |window, cx| {
+                    window.close_dialog(cx);
+                });
                 return modal.opacity(0.0);
             } else if elapsed >= 1.0 {
                 modal_opacity = 2.0 - elapsed;

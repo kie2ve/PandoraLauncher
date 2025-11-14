@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bridge::instance::InstanceID;
 use gpui::{prelude::*, *};
 use gpui_component::{
     IndexPath,
@@ -29,14 +28,6 @@ impl InstanceDropdown {
         self.search.get(index)
     }
 }
-
-#[derive(Clone)]
-struct InstanceItem {
-    title: SharedString,
-    id: InstanceID,
-}
-
-
 
 impl SelectDelegate for InstanceDropdown {
     type Item = InstanceEntry;

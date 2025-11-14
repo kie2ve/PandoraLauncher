@@ -1,28 +1,20 @@
 use std::{ffi::OsString, sync::Arc};
 
-use schema::{
-    loader::Loader,
-    modrinth::{ModrinthError, ModrinthRequest, ModrinthResult},
-    version_manifest::MinecraftVersionManifest,
-};
+use schema::loader::Loader;
 use ustr::Ustr;
 use uuid::Uuid;
 
 use crate::{
-    account::Account,
-    game_output::GameOutputLogLevel,
-    install::ContentInstall,
-    instance::{
+    account::Account, game_output::GameOutputLogLevel, install::ContentInstall, instance::{
         InstanceID, InstanceModID, InstanceModSummary, InstanceServerSummary, InstanceStatus, InstanceWorldSummary,
-    },
-    keep_alive::{KeepAlive, KeepAliveHandle},
-    modal_action::ModalAction,
+    }, keep_alive::{KeepAlive, KeepAliveHandle}, meta::{MetadataRequest, MetadataResult}, modal_action::ModalAction
 };
 
 #[derive(Debug)]
 pub enum MessageToBackend {
-    LoadVersionManifest {
-        reload: bool,
+    RequestMetadata {
+        request: MetadataRequest,
+        force_reload: bool,
     },
     CreateInstance {
         name: Ustr,
@@ -55,9 +47,6 @@ pub enum MessageToBackend {
         id: InstanceID,
         mod_id: InstanceModID,
     },
-    RequestModrinth {
-        request: ModrinthRequest,
-    },
     UpdateAccountHeadPng {
         uuid: Uuid,
         head_png: Arc<[u8]>,
@@ -72,7 +61,6 @@ pub enum MessageToBackend {
 
 #[derive(Debug)]
 pub enum MessageToFrontend {
-    VersionManifestUpdated(Result<Arc<MinecraftVersionManifest>, Arc<str>>),
     InstanceAdded {
         id: InstanceID,
         name: Ustr,
@@ -119,11 +107,6 @@ pub enum MessageToFrontend {
         notification_type: BridgeNotificationType,
         message: Arc<str>,
     },
-    ModrinthDataUpdated {
-        request: ModrinthRequest,
-        result: Result<ModrinthResult, ModrinthError>,
-        alive_handle: KeepAliveHandle,
-    },
     AccountsUpdated {
         accounts: Arc<[Account]>,
         selected_account: Option<Uuid>,
@@ -132,6 +115,11 @@ pub enum MessageToFrontend {
     CloseModal,
     MoveInstanceToTop {
         id: InstanceID,
+    },
+    MetadataResult {
+        request: MetadataRequest,
+        result: Result<MetadataResult, Arc<str>>,
+        keep_alive_handle: Option<KeepAliveHandle>,
     },
 }
 

@@ -19,8 +19,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{
     entity::{
-        DataEntities, account::AccountEntries, instance::InstanceEntries, modrinth::FrontendModrinthData,
-        version::VersionEntries,
+        account::AccountEntries, instance::InstanceEntries, metadata::FrontendMetadata, DataEntities
     },
     game_output::{GameOutput, GameOutputRoot},
     root::{LauncherRoot, LauncherRootGlobal},
@@ -114,14 +113,12 @@ pub fn start(
                 let instances = cx.new(|_| InstanceEntries {
                     entries: IndexMap::new(),
                 });
-                let versions = cx.new(|_| VersionEntries::new(backend_handle.clone()));
-                let modrinth = cx.new(|_| FrontendModrinthData::new(backend_handle.clone()));
+                let metadata = cx.new(|_| FrontendMetadata::new(backend_handle.clone()));
                 let accounts = cx.new(|_| AccountEntries::default());
                 let data = DataEntities {
                     instances,
-                    versions,
+                    metadata,
                     backend_handle,
-                    modrinth,
                     accounts,
                 };
 
@@ -134,9 +131,6 @@ pub fn start(
                     cx.spawn(async move |cx| {
                         while let Some(message) = recv.recv().await {
                             match message {
-                                MessageToFrontend::VersionManifestUpdated(result) => {
-                                    VersionEntries::set(&data.versions, result, cx);
-                                },
                                 MessageToFrontend::AccountsUpdated {
                                     accounts,
                                     selected_account,
@@ -245,15 +239,11 @@ pub fn start(
                                         });
                                     }
                                 },
-                                MessageToFrontend::ModrinthDataUpdated {
-                                    request,
-                                    result,
-                                    alive_handle,
-                                } => {
-                                    FrontendModrinthData::set(&data.modrinth, request, result, alive_handle, cx);
-                                },
                                 MessageToFrontend::MoveInstanceToTop { id } => {
                                     InstanceEntries::move_to_top(&data.instances, id, cx);
+                                },
+                                MessageToFrontend::MetadataResult { request, result, keep_alive_handle } => {
+                                    FrontendMetadata::set(&data.metadata, request, result, keep_alive_handle, cx);
                                 },
                             }
                         }

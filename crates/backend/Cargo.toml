@@ -38,3 +38,4 @@ mini-moka.workspace = true
 rustc-hash.workspace = true
 lexical-sort.workspace = true
 indexmap.workspace = true
+serde_with.workspace = true

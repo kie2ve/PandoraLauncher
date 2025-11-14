@@ -2,33 +2,42 @@ use std::sync::Arc;
 
 use auth::{credentials::AccountCredentials, secret::PlatformSecretStorage};
 use bridge::{
-    instance::InstanceStatus,
-    message::{MessageToBackend, MessageToFrontend},
-    modal_action::ProgressTracker,
+    instance::InstanceStatus, message::{MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::ProgressTracker
 };
 use schema::version::{LaunchArgument, LaunchArgumentValue};
 
 use crate::{
-    BackendState, LoginError, WatchTarget,
-    account::{BackendAccount, MinecraftLoginInfo},
-    instance::InstanceInfo,
-    launch::{ArgumentExpansionKey, LaunchError},
-    log_reader,
-    metadata::manager::{
-        AssetsIndexMetadata, MinecraftVersionManifestMetadata, MinecraftVersionMetadata,
-        MojangJavaRuntimeComponentMetadata, MojangJavaRuntimesMetadata,
-    },
+    account::{BackendAccount, MinecraftLoginInfo}, instance::InstanceInfo, launch::{ArgumentExpansionKey, LaunchError}, log_reader, metadata::items::{AssetsIndexMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, ModrinthProjectVersionsMetadataItem, ModrinthSearchMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem}, BackendState, LoginError, WatchTarget
 };
 
 impl BackendState {
     pub async fn handle_message(&mut self, message: MessageToBackend) {
         match message {
-            MessageToBackend::LoadVersionManifest { reload } => {
-                if reload {
-                    self.meta.force_reload(&MinecraftVersionManifestMetadata).await;
-                } else {
-                    self.meta.load(&MinecraftVersionManifestMetadata).await;
-                }
+            MessageToBackend::RequestMetadata { request, force_reload } => {
+                let meta = self.meta.clone();
+                let send = self.send.clone();
+                tokio::task::spawn(async move {
+                    let (result, keep_alive_handle) = match request {
+                        bridge::meta::MetadataRequest::MinecraftVersionManifest => {
+                            let (result, handle) = meta.fetch_with_keepalive(&MinecraftVersionManifestMetadataItem, force_reload).await;
+                            (result.map(MetadataResult::MinecraftVersionManifest), handle)
+                        },
+                        bridge::meta::MetadataRequest::ModrinthSearch(ref search) => {
+                            let (result, handle) = meta.fetch_with_keepalive(&ModrinthSearchMetadataItem(search), force_reload).await;
+                            (result.map(MetadataResult::ModrinthSearchResult), handle)
+                        },
+                        bridge::meta::MetadataRequest::ModrinthProjectVersions(ref project_versions) => {
+                            let (result, handle) = meta.fetch_with_keepalive(&ModrinthProjectVersionsMetadataItem(project_versions), force_reload).await;
+                            (result.map(MetadataResult::ModrinthProjectVersionsResult), handle)
+                        },
+                    };
+                    let result = result.map_err(|err| format!("{}", err).into());
+                    send.send(MessageToFrontend::MetadataResult {
+                        request,
+                        result,
+                        keep_alive_handle
+                    }).await;
+                });
             },
             MessageToBackend::RequestLoadWorlds { id } => {
                 if let Some(instance) = self.instances.get_mut(id.index) && instance.id == id {
@@ -312,9 +321,6 @@ impl BackendState {
                     let _ = std::fs::rename(&instance_mod.path, new_path);
                 }
             },
-            MessageToBackend::RequestModrinth { request } => {
-                self.modrinth_data.frontend_request(request).await;
-            },
             MessageToBackend::UpdateAccountHeadPng {
                 uuid,
                 head_png,
@@ -349,18 +355,18 @@ impl BackendState {
     }
 
     pub async fn download_all_metadata(&self) {
-        let Ok(versions) = self.meta.fetch(&MinecraftVersionManifestMetadata).await else {
+        let Ok(versions) = self.meta.fetch(&MinecraftVersionManifestMetadataItem).await else {
             panic!("Unable to get Minecraft version manifest");
         };
 
         for link in &versions.versions {
-            let Ok(version_info) = self.meta.fetch(&MinecraftVersionMetadata(link)).await else {
+            let Ok(version_info) = self.meta.fetch(&MinecraftVersionMetadataItem(link)).await else {
                 panic!("Unable to get load version: {:?}", link.id);
             };
 
             let asset_index = format!("{}", version_info.assets);
 
-            let Ok(_) = self.meta.fetch(&AssetsIndexMetadata {
+            let Ok(_) = self.meta.fetch(&AssetsIndexMetadataItem {
                 url: version_info.asset_index.url,
                 cache: self.directories.assets_index_dir.join(format!("{}.json", &asset_index)).into(),
                 hash: version_info.asset_index.sha1,
@@ -392,7 +398,7 @@ impl BackendState {
             }
         }
 
-        let Ok(runtimes) = self.meta.fetch(&MojangJavaRuntimesMetadata).await else {
+        let Ok(runtimes) = self.meta.fetch(&MojangJavaRuntimesMetadataItem).await else {
             panic!("Unable to get java runtimes manifest");
         };
 
@@ -409,7 +415,7 @@ impl BackendState {
                 };
 
                 for runtime_component in components {
-                    let Ok(manifest) = self.meta.fetch(&MojangJavaRuntimeComponentMetadata {
+                    let Ok(manifest) = self.meta.fetch(&MojangJavaRuntimeComponentMetadataItem {
                         url: runtime_component.manifest.url,
                         cache: runtime_component_dir.join("manifest.json").into(),
                         hash: runtime_component.manifest.sha1,

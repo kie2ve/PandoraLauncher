@@ -1,251 +1,50 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt::Display,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::Path,
+    sync::Arc, time::{Duration, Instant},
 };
 
-use bridge::{handle::FrontendHandle, message::MessageToFrontend};
+use bridge::keep_alive::{KeepAlive, KeepAliveHandle};
+use reqwest::StatusCode;
 use schema::{
-    assets_index::AssetsIndex,
-    fabric_launch::FabricLaunch,
-    fabric_loader_manifest::{FABRIC_LOADER_MANIFEST_URL, FabricLoaderManifest},
-    java_runtime_component::JavaRuntimeComponentManifest,
-    java_runtimes::{JAVA_RUNTIMES_URL, JavaRuntimes},
-    version::MinecraftVersion,
-    version_manifest::{MOJANG_VERSION_MANIFEST_URL, MinecraftVersionLink, MinecraftVersionManifest},
+    assets_index::AssetsIndex, fabric_launch::FabricLaunch, fabric_loader_manifest::FabricLoaderManifest, java_runtime_component::JavaRuntimeComponentManifest, java_runtimes::JavaRuntimes, modrinth::{ModrinthProjectVersionsResult, ModrinthSearchRequest, ModrinthSearchResult}, version::MinecraftVersion, version_manifest::MinecraftVersionManifest
 };
-use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use sha1::{Digest, Sha1};
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::task::JoinHandle;
 use ustr::Ustr;
 
-type MetaLoadStateWrapper<T> = Arc<tokio::sync::Mutex<MetaLoadState<T>>>;
+use crate::metadata::items::MetadataItem;
+
+const DATA_TTL: Duration = Duration::from_secs(5 * 60);
+
+pub(super) type MetaLoadStateWrapper<T> = Arc<tokio::sync::Mutex<(Option<KeepAliveHandle>, MetaLoadState<T>)>>;
 
 #[derive(Default)]
 pub struct MetadataManagerStates {
-    minecraft_version_manifest: MetaLoadStateWrapper<MinecraftVersionManifest>,
-    mojang_java_runtimes: MetaLoadStateWrapper<JavaRuntimes>,
-    fabric_loader_manifest: MetaLoadStateWrapper<FabricLoaderManifest>,
-    fabric_launch: std::sync::RwLock<HashMap<(Ustr, Ustr), MetaLoadStateWrapper<FabricLaunch>>>,
-    version_info: std::sync::RwLock<HashMap<Ustr, MetaLoadStateWrapper<MinecraftVersion>>>,
-    assets_index: std::sync::RwLock<HashMap<Ustr, MetaLoadStateWrapper<AssetsIndex>>>,
-    java_runtime_manifests: std::sync::RwLock<HashMap<Ustr, MetaLoadStateWrapper<JavaRuntimeComponentManifest>>>,
+    pub(super) minecraft_version_manifest: MetaLoadStateWrapper<MinecraftVersionManifest>,
+    pub(super) mojang_java_runtimes: MetaLoadStateWrapper<JavaRuntimes>,
+    pub(super) fabric_loader_manifest: MetaLoadStateWrapper<FabricLoaderManifest>,
+    pub(super) fabric_launch: HashMap<(Ustr, Ustr), MetaLoadStateWrapper<FabricLaunch>>,
+    pub(super) version_info: HashMap<Ustr, MetaLoadStateWrapper<MinecraftVersion>>,
+    pub(super) assets_index: HashMap<Ustr, MetaLoadStateWrapper<AssetsIndex>>,
+    pub(super) java_runtime_manifests: HashMap<Ustr, MetaLoadStateWrapper<JavaRuntimeComponentManifest>>,
+    pub(super) modrinth_search: HashMap<ModrinthSearchRequest, MetaLoadStateWrapper<ModrinthSearchResult>>,
+    pub(super) modrinth_project_versions: HashMap<Arc<str>, MetaLoadStateWrapper<ModrinthProjectVersionsResult>>,
 }
 
 pub struct MetadataManager {
-    states: MetadataManagerStates,
+    states: tokio::sync::Mutex<MetadataManagerStates>,
 
-    metadata_cache: Arc<Path>,
-    version_manifest_cache: Arc<Path>,
-    mojang_java_runtimes_cache: Arc<Path>,
-    fabric_loader_manifest_cache: Arc<Path>,
+    pub(super) metadata_cache: Arc<Path>,
+    pub(super) version_manifest_cache: Arc<Path>,
+    pub(super) mojang_java_runtimes_cache: Arc<Path>,
+    pub(super) fabric_loader_manifest_cache: Arc<Path>,
+
+    expiring: tokio::sync::Mutex<VecDeque<(Instant, KeepAlive)>>,
 
     http_client: reqwest::Client,
-    sender: FrontendHandle,
-    runtime: Handle,
-}
-
-pub trait MetadataItem {
-    type T: DeserializeOwned + Send + Sync + 'static;
-
-    fn url(&self) -> Ustr;
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T>;
-    fn cache_file(&self, _metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static;
-    fn data_hash(&self) -> Option<Ustr> {
-        None
-    }
-    fn try_send_to_backend(
-        _value: Result<Arc<Self::T>, MetaLoadError>,
-        _sender: FrontendHandle,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        async {}
-    }
-}
-
-pub struct MinecraftVersionManifestMetadata;
-
-impl MetadataItem for MinecraftVersionManifestMetadata {
-    type T = MinecraftVersionManifest;
-
-    fn url(&self) -> Ustr {
-        MOJANG_VERSION_MANIFEST_URL.into()
-    }
-
-    fn cache_file(&self, metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        Arc::clone(&metadata_manager.version_manifest_cache)
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        states.minecraft_version_manifest.clone()
-    }
-
-    async fn try_send_to_backend(value: Result<Arc<Self::T>, MetaLoadError>, sender: FrontendHandle) {
-        let _ = sender.send(MessageToFrontend::VersionManifestUpdated(value.map_err(|err| format!("{}", err).into()))).await;
-    }
-}
-
-pub struct MojangJavaRuntimesMetadata;
-
-impl MetadataItem for MojangJavaRuntimesMetadata {
-    type T = JavaRuntimes;
-
-    fn url(&self) -> Ustr {
-        JAVA_RUNTIMES_URL.into()
-    }
-
-    fn cache_file(&self, metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        Arc::clone(&metadata_manager.mojang_java_runtimes_cache)
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        states.mojang_java_runtimes.clone()
-    }
-}
-
-pub struct MinecraftVersionMetadata<'v>(pub &'v MinecraftVersionLink);
-
-impl<'v> MetadataItem for MinecraftVersionMetadata<'v> {
-    type T = MinecraftVersion;
-
-    fn url(&self) -> Ustr {
-        self.0.url
-    }
-
-    fn data_hash(&self) -> Option<Ustr> {
-        Some(self.0.sha1)
-    }
-
-    fn cache_file(&self, metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        if !crate::is_single_component_path(&self.0.sha1) {
-            panic!("Invalid sha1 {}, possible directory traversal attack?", self.0.sha1);
-        }
-        let mut path = metadata_manager.metadata_cache.join("version_info");
-        path.push(self.0.sha1.as_str());
-        path
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        let url = self.url();
-        if let Some(item) = states.version_info.read().unwrap().get(&url) {
-            item.clone()
-        } else {
-            let mut write = states.version_info.write().unwrap();
-            write.entry(url).or_default().clone()
-        }
-    }
-}
-
-pub struct AssetsIndexMetadata {
-    pub url: Ustr,
-    pub cache: Arc<Path>,
-    pub hash: Ustr,
-}
-
-impl MetadataItem for AssetsIndexMetadata {
-    type T = AssetsIndex;
-
-    fn url(&self) -> Ustr {
-        self.url
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        let url = self.url();
-        if let Some(item) = states.assets_index.read().unwrap().get(&url) {
-            item.clone()
-        } else {
-            let mut write = states.assets_index.write().unwrap();
-            write.entry(url).or_default().clone()
-        }
-    }
-
-    fn cache_file(&self, _: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        Arc::clone(&self.cache)
-    }
-
-    fn data_hash(&self) -> Option<Ustr> {
-        Some(self.hash)
-    }
-}
-
-pub struct MojangJavaRuntimeComponentMetadata {
-    pub url: Ustr,
-    pub cache: Arc<Path>,
-    pub hash: Ustr,
-}
-
-impl MetadataItem for MojangJavaRuntimeComponentMetadata {
-    type T = JavaRuntimeComponentManifest;
-
-    fn url(&self) -> Ustr {
-        self.url
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        let url = self.url();
-        if let Some(item) = states.java_runtime_manifests.read().unwrap().get(&url) {
-            item.clone()
-        } else {
-            let mut write = states.java_runtime_manifests.write().unwrap();
-            write.entry(url).or_default().clone()
-        }
-    }
-
-    fn cache_file(&self, _: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        Arc::clone(&self.cache)
-    }
-
-    fn data_hash(&self) -> Option<Ustr> {
-        Some(self.hash)
-    }
-}
-
-pub struct FabricLoaderManifestMetadata;
-
-impl MetadataItem for FabricLoaderManifestMetadata {
-    type T = FabricLoaderManifest;
-
-    fn url(&self) -> Ustr {
-        Ustr::from(FABRIC_LOADER_MANIFEST_URL)
-    }
-
-    fn cache_file(&self, metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        Arc::clone(&metadata_manager.fabric_loader_manifest_cache)
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        states.fabric_loader_manifest.clone()
-    }
-}
-
-pub struct FabricLaunchMetadata {
-    pub minecraft_version: Ustr,
-    pub loader_version: Ustr,
-}
-
-impl MetadataItem for FabricLaunchMetadata {
-    type T = FabricLaunch;
-
-    fn url(&self) -> Ustr {
-        format!("https://meta.fabricmc.net/v2/versions/loader/{}/{}", self.minecraft_version, self.loader_version).into()
-    }
-
-    fn cache_file(&self, metadata_manager: &MetadataManager) -> impl AsRef<Path> + Send + Sync + 'static {
-        let mut path = metadata_manager.metadata_cache.join("fabric_launch");
-        path.push(self.minecraft_version.as_str());
-        path.push(self.loader_version.as_str());
-        path
-    }
-
-    fn state(&self, states: &MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
-        let key = (self.minecraft_version, self.loader_version);
-        if let Some(item) = states.fabric_launch.read().unwrap().get(&key) {
-            item.clone()
-        } else {
-            let mut write = states.fabric_launch.write().unwrap();
-            write.entry(key).or_default().clone()
-        }
-    }
 }
 
 #[derive(thiserror::Error, Clone, Debug)]
@@ -254,6 +53,9 @@ pub enum MetaLoadError {
     Reqwest(Arc<reqwest::Error>),
     SerdeJson(Arc<serde_json::Error>),
     TokioJoin(Arc<tokio::task::JoinError>),
+    Error(Arc<str>),
+    ErrorWithDescription(Arc<str>, Arc<str>),
+    NonOK(u16),
 }
 
 impl Display for MetaLoadError {
@@ -288,6 +90,15 @@ impl Display for MetaLoadError {
             Self::SerdeJson(_) => {
                 f.write_str("Data was missing or malformed")
             }
+            Self::Error(error) => {
+                f.write_fmt(format_args!("{}", *error))
+            }
+            Self::ErrorWithDescription(error, description) => {
+                f.write_fmt(format_args!("{}\nDescription: {}", *error, *description))
+            }
+            Self::NonOK(status_code) => {
+                f.write_fmt(format_args!("Non-OK response: {}", *status_code))
+            }
             Self::TokioJoin(error) => f.debug_tuple("TokioJoin").field(error).finish(),
         }
     }
@@ -321,55 +132,107 @@ pub enum MetaLoadState<T> {
 }
 
 impl MetadataManager {
-    pub fn new(http_client: reqwest::Client, runtime: Handle, directory: Arc<Path>, sender: FrontendHandle) -> Self {
+    pub fn new(http_client: reqwest::Client, directory: Arc<Path>) -> Self {
         Self {
-            states: MetadataManagerStates::default(),
+            states: tokio::sync::Mutex::new(MetadataManagerStates::default()),
 
             version_manifest_cache: directory.join("version_manifest.json").into(),
             mojang_java_runtimes_cache: directory.join("mojang_java_runtimes.json").into(),
             fabric_loader_manifest_cache: directory.join("fabric_loader_manifest.json").into(),
             metadata_cache: directory,
 
+            expiring: Default::default(),
+
             http_client,
-            sender,
-            runtime,
+        }
+    }
+
+    pub async fn expire(&self) {
+        let now = Instant::now();
+
+        let mut expiring = self.expiring.lock().await;
+        while let Some((expires_at, _)) = expiring.front() {
+            if now > *expires_at {
+                expiring.pop_front();
+                continue;
+            }
+            return;
         }
     }
 
     pub async fn load<I: MetadataItem>(&self, item: &I) {
-        let state = item.state(&self.states);
-        let mut state = state.lock().await;
-        if matches!(*state, MetaLoadState::Unloaded) {
+        let wrapper = item.state(&mut *self.states.lock().await);
+        let mut wrapper = wrapper.lock().await;
+
+        let is_valid = wrapper.0.as_ref().map(|h| h.is_alive()).unwrap_or(true);
+        if !is_valid || matches!(wrapper.1, MetaLoadState::Unloaded) {
+            if item.expires() {
+                let keep_alive = KeepAlive::new();
+                let handle = keep_alive.create_handle();
+                wrapper.0 = Some(handle);
+                self.expiring.lock().await.push_back((Instant::now() + DATA_TTL, keep_alive));
+            }
+
             let cache_file = item.cache_file(self);
             Self::inner_start_loading(
-                &mut *state,
+                &mut wrapper.1,
                 item,
-                Some(cache_file),
+                cache_file,
                 &self.http_client,
-                &self.runtime,
-                self.sender.clone(),
             );
         }
     }
 
-    pub async fn force_reload<I: MetadataItem>(&self, item: &I) {
-        let state = item.state(&self.states);
-        let mut state = state.lock().await;
-        Self::inner_start_loading(
-            &mut *state,
-            item,
-            None::<PathBuf>,
-            &self.http_client,
-            &self.runtime,
-            self.sender.clone(),
-        );
+    pub async fn fetch<I: MetadataItem>(&self, item: &I) -> Result<Arc<<I as MetadataItem>::T>, MetaLoadError> {
+        self.fetch_with_keepalive(item, false).await.0
     }
 
-    pub async fn fetch<I: MetadataItem>(&self, item: &I) -> Result<Arc<<I as MetadataItem>::T>, MetaLoadError> {
-        let state = item.state(&self.states);
-        let mut state = state.lock().await;
-        let cache_file = item.cache_file(self);
-        Self::inner_fetch(&mut *state, item, cache_file, &self.http_client, &self.runtime, self.sender.clone()).await
+    pub async fn fetch_with_keepalive<I: MetadataItem>(&self, item: &I, force_reload: bool) -> (Result<Arc<<I as MetadataItem>::T>, MetaLoadError>, Option<KeepAliveHandle>) {
+        let wrapper = item.state(&mut *self.states.lock().await);
+        let mut wrapper = wrapper.lock().await;
+
+        let is_valid = wrapper.0.as_ref().map(|h| h.is_alive()).unwrap_or(true);
+        if force_reload || !is_valid || matches!(wrapper.1, MetaLoadState::Unloaded) {
+            if item.expires() {
+                let keep_alive = KeepAlive::new();
+                let handle = keep_alive.create_handle();
+                wrapper.0 = Some(handle);
+                self.expiring.lock().await.push_back((Instant::now() + DATA_TTL, keep_alive));
+            }
+
+            let cache_file = item.cache_file(self);
+            Self::inner_start_loading(
+                &mut wrapper.1,
+                item,
+                cache_file,
+                &self.http_client,
+            );
+        }
+
+        let valid = wrapper.0.clone();
+
+        match &mut wrapper.1 {
+            MetaLoadState::Unloaded => unreachable!(),
+            MetaLoadState::Pending(join_handle) => {
+                let result = join_handle.await.map_err(MetaLoadError::from).flatten();
+                match result {
+                    Ok(value) => {
+                        wrapper.1 = MetaLoadState::Loaded(Arc::clone(&value));
+                        (Ok(value), valid)
+                    },
+                    Err(error) => {
+                        wrapper.1 = MetaLoadState::Error(error.clone());
+                        (Err(error), valid)
+                    },
+                }
+            },
+            MetaLoadState::Loaded(value) => {
+                (Ok(Arc::clone(value)), valid)
+            },
+            MetaLoadState::Error(meta_load_error) => {
+                (Err(meta_load_error.clone()), valid)
+            },
+        }
     }
 
     fn inner_start_loading<I: MetadataItem>(
@@ -377,17 +240,14 @@ impl MetadataManager {
         item: &I,
         cache_file: Option<impl AsRef<Path> + Send + Sync + 'static>,
         http_client: &reqwest::Client,
-        runtime: &Handle,
-        sender: FrontendHandle,
     ) {
-        let url = item.url();
-        let http_client = http_client.clone();
+        let request = item.request(http_client);
         let expected_hash = item.data_hash().and_then(|sha1| {
             let mut expected_hash = [0u8; 20];
             hex::decode_to_slice(sha1.as_str(), &mut expected_hash).ok()?;
             Some(expected_hash)
         });
-        let join_handle = runtime.spawn(async move {
+        let join_handle = tokio::task::spawn(async move {
             let mut file_fallback = None;
 
             if let Some(cache_file) = &cache_file {
@@ -432,9 +292,29 @@ impl MetadataManager {
                 }
             }
 
-            let url = &url;
             let mut result: Result<Arc<I::T>, MetaLoadError> = async move {
-                let response = http_client.get(url.as_str()).timeout(std::time::Duration::from_secs(5)).send().await?;
+                let response = request.timeout(std::time::Duration::from_secs(5)).send().await?;
+
+                let status = response.status();
+                if status != StatusCode::OK {
+                    if let Ok(bytes) = response.bytes().await {
+                        #[derive(Deserialize)]
+                        struct ErrorMessages {
+                            error: Arc<str>,
+                            description: Option<Arc<str>>,
+                        }
+                        if let Ok(error_messages) = serde_json::from_slice::<ErrorMessages>(&bytes) {
+                            if let Some(description) = error_messages.description {
+                                return Err(MetaLoadError::ErrorWithDescription(error_messages.error, description));
+                            } else {
+                                return Err(MetaLoadError::Error(error_messages.error));
+                            }
+                        }
+                    }
+
+                    return Err(MetaLoadError::NonOK(status.as_u16()));
+                }
+
                 let bytes = response.bytes().await?;
 
                 // We try to decode before checking the hash because it's a more
@@ -478,43 +358,9 @@ impl MetadataManager {
                 }
             }
 
-            I::try_send_to_backend(result.clone(), sender).await;
-
             result
         });
 
         *state = MetaLoadState::Pending(join_handle);
-    }
-
-    async fn inner_fetch<I: MetadataItem>(
-        state: &mut MetaLoadState<I::T>,
-        item: &I,
-        cache_file: impl AsRef<Path> + Send + Sync + 'static,
-        http_client: &reqwest::Client,
-        runtime: &Handle,
-        sender: FrontendHandle,
-    ) -> Result<Arc<I::T>, MetaLoadError> {
-        if let MetaLoadState::Unloaded = state {
-            Self::inner_start_loading(state, item, Some(cache_file), http_client, runtime, sender);
-        }
-
-        match state {
-            MetaLoadState::Unloaded => unreachable!(),
-            MetaLoadState::Pending(join_handle) => {
-                let result = join_handle.await.map_err(MetaLoadError::from).flatten();
-                match result {
-                    Ok(value) => {
-                        *state = MetaLoadState::Loaded(Arc::clone(&value));
-                        Ok(value)
-                    },
-                    Err(error) => {
-                        *state = MetaLoadState::Error(error.clone());
-                        Err(error)
-                    },
-                }
-            },
-            MetaLoadState::Loaded(value) => Ok(Arc::clone(value)),
-            MetaLoadState::Error(meta_load_error) => Err(meta_load_error.clone()),
-        }
     }
 }

@@ -11,8 +11,7 @@ use gpui_component::{
 
 use crate::{
     entity::{
-        DataEntities,
-        instance::{InstanceAddedEvent, InstanceModifiedEvent, InstanceMovedToTopEvent, InstanceRemovedEvent},
+        instance::{InstanceAddedEvent, InstanceModifiedEvent, InstanceMovedToTopEvent, InstanceRemovedEvent}, DataEntities
     },
     pages::{instance::instance_page::InstancePage, instances_page::InstancesPage, modrinth_page::ModrinthSearchPage},
     png_render_cache,
@@ -32,7 +31,10 @@ pub struct LauncherUI {
 #[derive(Clone)]
 pub enum LauncherPage {
     Instances(Entity<InstancesPage>),
-    Modrinth(Entity<ModrinthSearchPage>),
+    Modrinth {
+        installing_for: Option<InstanceID>,
+        page: Entity<ModrinthSearchPage>,
+    },
     InstancePage(InstanceID, Entity<InstancePage>),
 }
 
@@ -40,7 +42,7 @@ impl LauncherPage {
     pub fn into_any_element(self) -> AnyElement {
         match self {
             LauncherPage::Instances(entity) => entity.into_any_element(),
-            LauncherPage::Modrinth(entity) => entity.into_any_element(),
+            LauncherPage::Modrinth { page, .. } => page.into_any_element(),
             LauncherPage::InstancePage(_, entity) => entity.into_any_element(),
         }
     }
@@ -48,7 +50,7 @@ impl LauncherPage {
     pub fn page_type(&self) -> PageType {
         match self {
             LauncherPage::Instances(_) => PageType::Instances,
-            LauncherPage::Modrinth(_) => PageType::Modrinth,
+            LauncherPage::Modrinth { installing_for, .. } => PageType::Modrinth { installing_for: *installing_for },
             LauncherPage::InstancePage(id, _) => PageType::InstancePage(*id),
         }
     }
@@ -126,11 +128,15 @@ impl LauncherUI {
                 self.page = LauncherPage::Instances(cx.new(|cx| InstancesPage::new(data, window, cx)));
                 cx.notify();
             },
-            PageType::Modrinth => {
-                if let LauncherPage::Modrinth(..) = self.page {
+            PageType::Modrinth { installing_for } => {
+                if let LauncherPage::Modrinth { installing_for: current_installing_for, .. } = self.page && current_installing_for == installing_for {
                     return;
                 }
-                self.page = LauncherPage::Modrinth(cx.new(|cx| ModrinthSearchPage::new(data, window, cx)));
+                let page = cx.new(|cx| ModrinthSearchPage::new(data, installing_for, window, cx));
+                self.page = LauncherPage::Modrinth {
+                    installing_for,
+                    page,
+                };
                 cx.notify();
             },
             PageType::InstancePage(id) => {
@@ -147,7 +153,9 @@ impl LauncherUI {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum PageType {
     Instances,
-    Modrinth,
+    Modrinth {
+        installing_for: Option<InstanceID>,
+    },
     InstancePage(InstanceID),
 }
 
@@ -169,9 +177,9 @@ impl Render for LauncherUI {
 
         let launcher_group = SidebarGroup::new("Content").child(
             SidebarMenu::new().children([SidebarMenuItem::new("Modrinth")
-                .active(page_type == PageType::Modrinth)
+                .active(page_type == PageType::Modrinth { installing_for: None })
                 .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Modrinth, window, cx);
+                    launcher.switch_page(PageType::Modrinth { installing_for: None }, window, cx);
                 }))]),
         );
 

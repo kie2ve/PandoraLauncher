@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{Cursor, Write},
+    io::Cursor,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -29,9 +29,8 @@ use crate::{
     directories::LauncherDirectories,
     instance::Instance,
     launch::Launcher,
-    metadata::manager::{MetadataManager, MinecraftVersionManifestMetadata},
+    metadata::{items::MinecraftVersionManifestMetadataItem, manager::MetadataManager},
     mod_metadata::ModMetadataManager,
-    modrinth::data::ModrinthData,
 };
 
 pub fn start(send: FrontendHandle, self_handle: BackendHandle, recv: Receiver<MessageToBackend>) {
@@ -56,9 +55,7 @@ pub fn start(send: FrontendHandle, self_handle: BackendHandle, recv: Receiver<Me
 
     let meta = Arc::new(MetadataManager::new(
         http_client.clone(),
-        runtime.handle().clone(),
         directories.metadata_dir.clone(),
-        send.clone(),
     ));
 
     let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel::<notify_debouncer_full::DebounceEventResult>(64);
@@ -66,12 +63,12 @@ pub fn start(send: FrontendHandle, self_handle: BackendHandle, recv: Receiver<Me
         let _ = watcher_tx.blocking_send(event);
     }).unwrap();
 
-    let modrinth_data = ModrinthData::new(http_client.clone(), send.clone());
-
     let mut account_info = load_accounts_json(&directories);
     for account in account_info.accounts.values_mut() {
         account.try_load_head_32x_from_head();
     }
+
+    let mod_metadata_manager = ModMetadataManager::load(directories.content_meta_dir.clone());
 
     let state = BackendState {
         recv,
@@ -87,11 +84,10 @@ pub fn start(send: FrontendHandle, self_handle: BackendHandle, recv: Receiver<Me
         instances_generation: 0,
         directories: Arc::clone(&directories),
         launcher: Launcher::new(meta, directories, send),
-        mod_metadata_manager: Arc::new(ModMetadataManager::default()),
+        mod_metadata_manager: Arc::new(mod_metadata_manager),
         // todo: replace notify tick with a call to self_handle
         notify_tick: Arc::new(tokio::sync::Notify::new()),
         reload_mods_immediately: HashSet::new(),
-        modrinth_data,
         account_info,
         secret_storage: OnceCell::new(),
     };
@@ -130,7 +126,6 @@ pub struct BackendState {
     pub mod_metadata_manager: Arc<ModMetadataManager>,
     pub notify_tick: Arc<tokio::sync::Notify>,
     pub reload_mods_immediately: HashSet<InstanceID>,
-    pub modrinth_data: ModrinthData,
     pub account_info: BackendAccountInfo,
     pub secret_storage: OnceCell<PlatformSecretStorage>,
 }
@@ -138,7 +133,7 @@ pub struct BackendState {
 impl BackendState {
     async fn start(mut self) {
         // Pre-fetch version manifest
-        self.meta.load(&MinecraftVersionManifestMetadata).await;
+        self.meta.load(&MinecraftVersionManifestMetadataItem).await;
 
         self.send.send(self.account_info.create_update_message()).await;
 
@@ -310,7 +305,7 @@ impl BackendState {
     }
 
     async fn handle_tick(&mut self) {
-        self.modrinth_data.expire().await;
+        self.meta.expire().await;
 
         for (_, instance) in &mut self.instances {
             if let Some(child) = &mut instance.child
@@ -508,37 +503,13 @@ impl BackendState {
             }
         }
     }
-    
-    pub fn write_safe(&mut self, path: impl AsRef<Path>, content: impl AsRef<[u8]>) -> std::io::Result<()> {
-        let path = path.as_ref();
-        let content = content.as_ref();
-        
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        
-        let mut temp = path.to_path_buf();
-        temp.add_extension("new");
-        
-        let mut temp_file = std::fs::File::create(&temp)?;
-        
-        temp_file.write_all(content)?;
-        temp_file.flush()?;
-        temp_file.sync_all()?;
-        
-        drop(temp_file);
-        
-        std::fs::rename(temp, path)?;
-        
-        Ok(())
-    }
 
     pub async fn write_account_info(&mut self) {
         let Ok(data) = serde_json::to_vec(&self.account_info) else {
             self.send.send_error("Failed to serialize account info").await;
             return;
         };
-        if self.write_safe(self.directories.accounts_json.clone(), data).is_err() {
+        if crate::write_safe(self.directories.accounts_json.clone(), data).is_err() {
             self.send.send_error("Failed to write to accounts.json").await;
         }
     }

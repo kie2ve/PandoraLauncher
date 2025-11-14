@@ -41,7 +41,7 @@ ftree = { path = "../ftree"}
 futures = "0.3.31"
 gpui = "0.2.2"
 gpui-component = { path = "../gpui-component/crates/ui" }
-hex = "0.4.3"
+hex = { version = "0.4.3", features = ["serde"] }
 image = "0.25.8"
 indexmap = { version = "2.12.0", features = ["serde"] }
 lexical-sort = "0.3.1"
@@ -89,3 +89,4 @@ heapless = "0.9.1"
 intrusive-collections = "0.9.7"
 tokio-util = "0.7.17"
 enumset = "1.1.10"
+serde_with = "3.15.1"

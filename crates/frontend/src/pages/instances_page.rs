@@ -17,18 +17,18 @@ use gpui_component::{
     table::{Table, TableState},
     v_flex,
 };
-use schema::{loader::Loader, version_manifest::MinecraftVersionType};
+use schema::{loader::Loader, version_manifest::{MinecraftVersionManifest, MinecraftVersionType}};
 
 use crate::{
     component::instance_list::InstanceList,
-    entity::{DataEntities, instance::InstanceEntries, version::VersionEntries},
+    entity::{instance::InstanceEntries, metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult}, DataEntities},
     ui,
 };
 
 pub struct InstancesPage {
     instance_table: Entity<TableState<InstanceList>>,
 
-    versions: Entity<VersionEntries>,
+    metadata: Entity<FrontendMetadata>,
     instances: Entity<InstanceEntries>,
 
     backend_handle: BackendHandle,
@@ -40,7 +40,7 @@ impl InstancesPage {
 
         Self {
             instance_table,
-            versions: data.versions.clone(),
+            metadata: data.metadata.clone(),
             instances: data.instances.clone(),
             backend_handle: data.backend_handle.clone(),
         }
@@ -146,49 +146,47 @@ impl InstancesPage {
             })
         };
 
-        self.versions.read(cx).load_if_missing();
+        let versions = FrontendMetadata::request(&self.metadata, bridge::meta::MetadataRequest::MinecraftVersionManifest, cx);
 
         let backend_handle = self.backend_handle.clone();
 
         let reload_version_dropdown = {
-            let versions = self.versions.clone();
             let loaded_versions = Arc::clone(&loaded_versions);
             let show_snapshots = Arc::clone(&show_snapshots);
             let error_loading_versions = Arc::clone(&error_loading_versions);
             let minecraft_version_dropdown = minecraft_version_dropdown.clone();
+            let versions = versions.clone();
 
             move |window: &mut Window, cx: &mut App| {
                 cx.update_entity(&minecraft_version_dropdown, |dropdown, cx| {
-                    let versions = versions.read(cx);
+                    let result: FrontendMetadataResult<MinecraftVersionManifest> = versions.read(cx).result();
+                    let (versions, latest) = match result {
+                        FrontendMetadataResult::Loading => {
+                            loaded_versions.store(false, Ordering::Relaxed);
+                            (Vec::new(), None)
+                        },
+                        FrontendMetadataResult::Error(error) => {
+                            loaded_versions.store(false, Ordering::Relaxed);
+                            *error_loading_versions.write().unwrap() = Some(error);
+                            (Vec::new(), None)
+                        },
+                        FrontendMetadataResult::Loaded(manifest) => {
+                            loaded_versions.store(true, Ordering::Relaxed);
+                            *error_loading_versions.write().unwrap() = None;
 
-                    let (versions, latest) = if let Some(manifest) = &versions.manifest {
-                        match manifest {
-                            Ok(manifest) => {
-                                loaded_versions.store(true, Ordering::Relaxed);
-                                *error_loading_versions.write().unwrap() = None;
+                            let versions: Vec<SharedString> = if show_snapshots.load(Ordering::Relaxed) {
+                                manifest.versions.iter().map(|v| SharedString::from(v.id.as_str())).collect()
+                            } else {
+                                manifest
+                                    .versions
+                                    .iter()
+                                    .filter(|v| !matches!(v.r#type, MinecraftVersionType::Snapshot))
+                                    .map(|v| SharedString::from(v.id.as_str()))
+                                    .collect()
+                            };
 
-                                let versions: Vec<SharedString> = if show_snapshots.load(Ordering::Relaxed) {
-                                    manifest.versions.iter().map(|v| SharedString::from(v.id.as_str())).collect()
-                                } else {
-                                    manifest
-                                        .versions
-                                        .iter()
-                                        .filter(|v| !matches!(v.r#type, MinecraftVersionType::Snapshot))
-                                        .map(|v| SharedString::from(v.id.as_str()))
-                                        .collect()
-                                };
-
-                                (versions, Some(SharedString::from(manifest.latest.release.as_str())))
-                            },
-                            Err(error) => {
-                                loaded_versions.store(false, Ordering::Relaxed);
-                                *error_loading_versions.write().unwrap() = Some(SharedString::from(error.clone()));
-                                (Vec::new(), None)
-                            },
-                        }
-                    } else {
-                        loaded_versions.store(false, Ordering::Relaxed);
-                        (Vec::new(), None)
+                            (versions, Some(SharedString::from(manifest.latest.release.as_str())))
+                        },
                     };
 
                     let mut to_select = None;
@@ -233,14 +231,12 @@ impl InstancesPage {
         let subscription = {
             let window_handle = window.window_handle();
             let reload_version_dropdown = reload_version_dropdown.clone();
-            cx.observe(&self.versions, move |_, _, cx| {
+            cx.observe(&versions, move |_, _, cx| {
                 let _ = window_handle.update(cx, |_, window, cx| {
                     (reload_version_dropdown)(window, cx);
                 });
             })
         };
-
-        let versions = self.versions.clone();
 
         struct FallbackNameInfo {
             original: SharedString,
@@ -250,6 +246,8 @@ impl InstancesPage {
             original: unnamed_instance_name.clone(),
             actual: unnamed_instance_name.clone(),
         }));
+
+        let metadata = self.metadata.clone();
 
         window.open_dialog(cx, move |modal, window, cx| {
             let _ = &subscription;
@@ -288,15 +286,15 @@ impl InstancesPage {
                     .icon(IconName::CircleX)
                     .title("Error loading Minecraft versions");
 
-                let versions = versions.clone();
                 let error_loading_versions = Arc::clone(&error_loading_versions);
+                let metadata = metadata.clone();
                 let reload_button =
                     Button::new("reload-versions")
                         .primary()
                         .label("Reload Versions")
                         .on_click(move |_, _, cx| {
                             *error_loading_versions.write().unwrap() = None;
-                            versions.read(cx).reload();
+                            FrontendMetadata::force_reload(&metadata, bridge::meta::MetadataRequest::MinecraftVersionManifest, cx);
                         });
 
                 return modal

@@ -1,21 +1,18 @@
 use std::{ops::Range, sync::Arc, time::Duration};
 
-use bridge::install::ContentType;
+use bridge::{install::ContentType, instance::InstanceID, meta::MetadataRequest};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    button::{Button, ButtonGroup, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::{Notification, NotificationType}, popover::Popover, scroll::{Scrollbar, ScrollbarState}, skeleton::Skeleton, v_flex, ActiveTheme, Icon, IconName, Selectable, StyledExt, WindowExt
+    button::{Button, ButtonGroup, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::NotificationType, scroll::{Scrollbar, ScrollbarState}, skeleton::Skeleton, v_flex, ActiveTheme, Icon, IconName, Selectable, StyledExt, WindowExt
 };
 use schema::modrinth::{
-    ModrinthError, ModrinthHit, ModrinthRequest, ModrinthResult, ModrinthSearchRequest, ModrinthSideRequirement,
+    ModrinthHit, ModrinthSearchRequest, ModrinthSearchResult, ModrinthSideRequirement
 };
 
 use crate::{
-    entity::{
-        DataEntities,
-        modrinth::{FrontendModrinthData, FrontendModrinthDataState},
-    },
-    modals::modrinth_install::InstallDialogLoading,
-    ts, ui,
+    component::error_alert::ErrorAlert, entity::{
+        metadata::{AsMetadataResult, FrontendMetadata, FrontendMetadataResult}, DataEntities
+    }, ts, ui
 };
 
 #[derive(PartialEq)]
@@ -30,6 +27,8 @@ enum ProjectType {
 pub struct ModrinthSearchPage {
     data: DataEntities,
     hits: Vec<ModrinthHit>,
+    title: SharedString,
+    install_for: Option<InstanceID>,
     loading: Option<Subscription>,
     pending_clear: bool,
     total_hits: usize,
@@ -40,17 +39,29 @@ pub struct ModrinthSearchPage {
     last_search: Arc<str>,
     scroll_state: ScrollbarState,
     scroll_handle: UniformListScrollHandle,
+    search_error: Option<SharedString>,
 }
 
 impl ModrinthSearchPage {
-    pub fn new(data: &DataEntities, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(data: &DataEntities, install_for: Option<InstanceID>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_state = cx.new(|cx| InputState::new(window, cx).placeholder("Search mods...").clean_on_escape());
 
         let _search_input_subscription = cx.subscribe_in(&search_state, window, Self::on_search_input_event);
 
+        let install_for = install_for.and_then(|id| {
+            Some(data.instances.read(cx).entries.get(&id)?.read(cx))
+        });
+        let title = if let Some(install_for) = install_for {
+            format!("Modrinth: Installing into instance '{}'", install_for.name).into()
+        } else {
+            "Modrinth".into()
+        };
+
         let mut page = Self {
             data: data.clone(),
             hits: Vec::new(),
+            title,
+            install_for: install_for.map(|e| e.id),
             loading: None,
             pending_clear: false,
             total_hits: 1,
@@ -61,6 +72,7 @@ impl ModrinthSearchPage {
             last_search: Arc::from(""),
             scroll_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::new(),
+            search_error: None,
         };
         page.load_more(cx);
         page
@@ -120,6 +132,7 @@ impl ModrinthSearchPage {
         if self.loading.is_some() {
             return;
         }
+        self.search_error = None;
 
         let query = if self.last_search.is_empty() {
             None
@@ -145,54 +158,68 @@ impl ModrinthSearchPage {
             limit: 20,
         };
 
-        let data = FrontendModrinthData::request(&self.data.modrinth, ModrinthRequest::Search(request), cx);
+        let data = FrontendMetadata::request(&self.data.metadata, MetadataRequest::ModrinthSearch(request), cx);
 
-        if let FrontendModrinthDataState::Loaded { result, .. } = data.read(cx) {
-            self.apply_search_data(result);
-            return;
+        let result: FrontendMetadataResult<ModrinthSearchResult> = data.read(cx).result();
+        match result {
+            FrontendMetadataResult::Loading => {
+                let subscription = cx.observe(&data, |page, data, cx| {
+                    let result: FrontendMetadataResult<ModrinthSearchResult> = data.read(cx).result();
+                    match result {
+                        FrontendMetadataResult::Loading => {},
+                        FrontendMetadataResult::Loaded(result) => {
+                            page.apply_search_data(result);
+                            page.loading = None;
+                            cx.notify();
+                        },
+                        FrontendMetadataResult::Error(shared_string) => {
+                            page.search_error = Some(shared_string);
+                            page.loading = None;
+                            cx.notify();
+                        },
+                    }
+                });
+                self.loading = Some(subscription);
+            },
+            FrontendMetadataResult::Loaded(result) => {
+                self.apply_search_data(result);
+            },
+            FrontendMetadataResult::Error(shared_string) => {
+                self.search_error = Some(shared_string);
+            },
         }
-
-        let subscription = cx.observe(&data, |page, data, cx| {
-            if let FrontendModrinthDataState::Loaded { result, .. } = data.read(cx) {
-                page.apply_search_data(result);
-                page.loading = None;
-                cx.notify();
-            }
-        });
-        self.loading = Some(subscription);
     }
 
-    fn apply_search_data(&mut self, result: &Result<ModrinthResult, ModrinthError>) {
+    fn apply_search_data(&mut self, search_result: &ModrinthSearchResult) {
         if self.pending_clear {
             self.pending_clear = false;
             self.hits.clear();
             self.total_hits = 1;
+            self._delayed_clear_task = Task::ready(());
         }
 
-        match result {
-            Ok(value) => {
-                let ModrinthResult::Search(search_result) = value else {
-                    unreachable!();
-                };
-
-                self.hits.extend(search_result.hits.iter().cloned());
-                self.total_hits = search_result.total_hits;
-            },
-            Err(error) => todo!(),
-        }
+        self.hits.extend(search_result.hits.iter().cloned());
+        self.total_hits = search_result.total_hits;
     }
-    
-    fn render_items(&mut self, visible_range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Div> {
+
+    fn render_items(&mut self, visible_range: Range<usize>, _window: &mut Window, cx: &mut Context<Self>) -> Vec<Div> {
         let theme = cx.theme();
         let mut should_load_more = false;
         let items = visible_range
             .map(|index| {
                 let Some(hit) = self.hits.get(index) else {
-                    should_load_more = true;
-                    return div()
-                        .pl_3()
-                        .pt_3()
-                        .child(Skeleton::new().w_full().h(px(28.0 * 4.0)).rounded_lg());
+                    if let Some(search_error) = self.search_error.clone() {
+                        return div()
+                            .pl_3()
+                            .pt_3()
+                            .child(ErrorAlert::new("search_error", "Error requesting from Modrinth".into(), search_error));
+                    } else {
+                        should_load_more = true;
+                        return div()
+                            .pl_3()
+                            .pt_3()
+                            .child(Skeleton::new().w_full().h(px(28.0 * 4.0)).rounded_lg());
+                    }
                 };
 
                 let image = if let Some(icon_url) = &hit.icon_url
@@ -276,6 +303,7 @@ impl ModrinthSearchPage {
                                 let data = self.data.clone();
                                 let name = name.clone();
                                 let project_id = hit.project_id.clone();
+                                let install_for = self.install_for.clone();
                                 let content_type = match hit.project_type {
                                     schema::modrinth::ModrinthProjectType::Mod => {
                                         Some(ContentType::Mod)
@@ -294,15 +322,15 @@ impl ModrinthSearchPage {
 
                                 move |_, window, cx| {
                                     if let Some(content_type) = content_type {
-                                        let install = InstallDialogLoading::new(
+                                        crate::modals::modrinth_install::open(
                                             name.as_str(),
                                             project_id.clone(),
                                             content_type,
+                                            install_for,
                                             &data,
                                             window,
-                                            cx,
+                                            cx
                                         );
-                                        install.show(window, cx);
                                     } else {
                                         window.push_notification(
                                             (
@@ -391,7 +419,7 @@ impl Render for ModrinthSearchPage {
         let scroll_handle = self.scroll_handle.clone();
         let scroll_state = self.scroll_state.clone();
 
-        let item_count = self.hits.len() + if can_load_more { 1 } else { 0 };
+        let item_count = self.hits.len() + if can_load_more || self.search_error.is_some() { 1 } else { 0 };
 
         let list = h_flex()
             .size_full()
@@ -446,7 +474,7 @@ impl Render for ModrinthSearchPage {
 
         let parameters = v_flex().h_full().gap_3().child(type_button_group);
 
-        ui::page(cx, "Modrinth").child(h_flex().size_full().p_3().gap_3().child(parameters).child(content))
+        ui::page(cx, self.title.clone()).child(h_flex().size_full().p_3().gap_3().child(parameters).child(content))
     }
 }
 
