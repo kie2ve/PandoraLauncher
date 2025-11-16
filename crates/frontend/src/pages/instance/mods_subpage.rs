@@ -7,15 +7,18 @@ use bridge::{
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    button::{Button, ButtonVariants}, h_flex, list::{ListDelegate, ListItem, ListState}, notification::{Notification, NotificationType}, switch::Switch, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable, WindowExt
+    breadcrumb::{Breadcrumb, BreadcrumbItem}, button::{Button, ButtonVariants}, h_flex, list::{ListDelegate, ListItem, ListState}, notification::{Notification, NotificationType}, switch::Switch, v_flex, ActiveTheme as _, Icon, IconName, IndexPath, Sizable, WindowExt
 };
 use rustc_hash::FxHashSet;
 use schema::content::ContentSource;
 
-use crate::{entity::instance::InstanceEntry, png_render_cache, root::LauncherRootGlobal};
+use crate::{entity::instance::InstanceEntry, png_render_cache, root::{self, LauncherRootGlobal}};
+
+use super::instance_page::InstanceSubpageType;
 
 pub struct InstanceModsSubpage {
     instance: InstanceID,
+    instance_title: SharedString,
     backend_handle: BackendHandle,
     mods_state: Arc<AtomicBridgeDataLoadState>,
     mod_list: Entity<ListState<ModsListDelegate>>,
@@ -31,6 +34,7 @@ impl InstanceModsSubpage {
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let instance = instance.read(cx);
+        let instance_title = instance.title().into();
         let instance_id = instance.id;
 
         let mods_state = Arc::clone(&instance.mods_state);
@@ -68,6 +72,7 @@ impl InstanceModsSubpage {
 
         Self {
             instance: instance_id,
+            instance_title,
             backend_handle,
             mods_state,
             mod_list,
@@ -106,14 +111,17 @@ impl Render for InstanceModsSubpage {
             }))
             .child(Button::new("addmr").label("Add from Modrinth").success().compact().small().on_click({
                 let instance = self.instance;
+                let instance_title = self.instance_title.clone();
                 move |_, window, cx| {
-                    cx.update_global::<LauncherRootGlobal, ()>(|global, cx| {
-                        global.root.update(cx, |launcher_root, cx| {
-                            launcher_root.ui.update(cx, |ui, cx| {
-                                ui.switch_page(crate::ui::PageType::Modrinth { installing_for: Some(instance) }, window, cx);
-                            });
-                        });
+                    let page = crate::ui::PageType::Modrinth { installing_for: Some(instance) };
+                    let instances_item = BreadcrumbItem::new("Instances").on_click(|_, window, cx| {
+                        root::switch_page(crate::ui::PageType::Instances, None, window, cx);
                     });
+                    let instance_item = BreadcrumbItem::new(instance_title.clone()).on_click(move |_, window, cx| {
+                        root::switch_page(crate::ui::PageType::InstancePage(instance, InstanceSubpageType::Mods), None, window, cx);
+                    });
+                    let breadcrumb = Breadcrumb::new().text_xl().child(instances_item).child(instance_item);
+                    root::switch_page(page, Some(breadcrumb), window, cx);
 
                 }
             }))

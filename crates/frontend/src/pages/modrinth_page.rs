@@ -3,7 +3,7 @@ use std::{ops::Range, sync::Arc, time::Duration};
 use bridge::{install::ContentType, instance::InstanceID, meta::MetadataRequest};
 use gpui::{prelude::*, *};
 use gpui_component::{
-    button::{Button, ButtonGroup, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::NotificationType, scroll::{Scrollbar, ScrollbarState}, skeleton::Skeleton, v_flex, ActiveTheme, Icon, IconName, Selectable, StyledExt, WindowExt
+    breadcrumb::Breadcrumb, button::{Button, ButtonGroup, ButtonVariants}, h_flex, input::{Input, InputEvent, InputState}, notification::NotificationType, scroll::{Scrollbar, ScrollbarState}, skeleton::Skeleton, v_flex, ActiveTheme, Icon, IconName, Selectable, StyledExt, WindowExt
 };
 use schema::modrinth::{
     ModrinthHit, ModrinthSearchRequest, ModrinthSearchResult, ModrinthSideRequirement
@@ -27,7 +27,7 @@ enum ProjectType {
 pub struct ModrinthSearchPage {
     data: DataEntities,
     hits: Vec<ModrinthHit>,
-    title: SharedString,
+    breadcrumb: Breadcrumb,
     install_for: Option<InstanceID>,
     loading: Option<Subscription>,
     pending_clear: bool,
@@ -44,25 +44,22 @@ pub struct ModrinthSearchPage {
 }
 
 impl ModrinthSearchPage {
-    pub fn new(data: &DataEntities, install_for: Option<InstanceID>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(data: &DataEntities, install_for: Option<InstanceID>, breadcrumb: Breadcrumb, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_state = cx.new(|cx| InputState::new(window, cx).placeholder("Search mods...").clean_on_escape());
 
         let _search_input_subscription = cx.subscribe_in(&search_state, window, Self::on_search_input_event);
 
-        let install_for = install_for.and_then(|id| {
-            Some(data.instances.read(cx).entries.get(&id)?.read(cx))
-        });
-        let title = if let Some(install_for) = install_for {
-            format!("Modrinth: Installing into instance '{}'", install_for.name).into()
+        let breadcrumb = if install_for.is_some() {
+            breadcrumb.child("Add from Modrinth")
         } else {
-            "Modrinth".into()
+            breadcrumb.child("Modrinth")
         };
 
         let mut page = Self {
             data: data.clone(),
             hits: Vec::new(),
-            title,
-            install_for: install_for.map(|e| e.id),
+            breadcrumb,
+            install_for,
             loading: None,
             pending_clear: false,
             total_hits: 1,
@@ -477,7 +474,7 @@ impl Render for ModrinthSearchPage {
 
         let parameters = v_flex().h_full().gap_3().child(type_button_group);
 
-        ui::page(cx, self.title.clone()).child(h_flex().size_full().p_3().gap_3().child(parameters).child(content))
+        ui::page(cx, self.breadcrumb.clone()).child(h_flex().size_full().p_3().gap_3().child(parameters).child(content))
     }
 }
 

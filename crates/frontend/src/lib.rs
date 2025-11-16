@@ -6,7 +6,7 @@ use std::{
 };
 
 use bridge::{
-    handle::{BackendHandle, FrontendReceiver},
+    handle::{BackendHandle, FrontendHandle, FrontendReceiver},
     message::{BridgeNotificationType, MessageToFrontend},
 };
 use gpui::*;

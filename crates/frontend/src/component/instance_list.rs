@@ -9,11 +9,8 @@ use gpui_component::{
 
 use crate::{
     entity::{
-        DataEntities,
-        instance::{InstanceAddedEvent, InstanceEntry, InstanceModifiedEvent, InstanceRemovedEvent},
-    },
-    root::{self, LauncherRootGlobal},
-    ui,
+        instance::{InstanceAddedEvent, InstanceEntry, InstanceModifiedEvent, InstanceRemovedEvent}, DataEntities
+    }, pages::instance::instance_page::InstanceSubpageType, root::{self, LauncherRootGlobal}, ui
 };
 
 pub struct InstanceList {
@@ -136,13 +133,7 @@ impl TableDelegate for InstanceList {
                         .child(Button::new("view").w(relative(0.5)).small().info().label("View").on_click({
                             let id = item.id;
                             move |_, window, cx| {
-                                cx.update_global::<LauncherRootGlobal, ()>(|global, cx| {
-                                    global.root.update(cx, |launcher_root, cx| {
-                                        launcher_root.ui.update(cx, |ui, cx| {
-                                            ui.switch_page(ui::PageType::InstancePage(id), window, cx);
-                                        });
-                                    });
-                                });
+                                root::switch_page(ui::PageType::InstancePage(id, InstanceSubpageType::Quickplay), None, window, cx);
                             }
                         }))
                         .into_any_element()

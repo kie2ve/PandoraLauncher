@@ -5,10 +5,7 @@ use bridge::{
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    Icon, IconName,
-    button::{Button, ButtonVariants},
-    h_flex,
-    tab::{Tab, TabBar},
+    breadcrumb::{Breadcrumb, BreadcrumbItem}, button::{Button, ButtonVariants}, h_flex, tab::{Tab, TabBar}, Icon, IconName
 };
 
 use crate::{
@@ -18,21 +15,16 @@ use crate::{
 };
 
 pub struct InstancePage {
+    breadcrumb: Breadcrumb,
     backend_handle: BackendHandle,
-    pub title: SharedString,
+    title: SharedString,
     instance: Entity<InstanceEntry>,
     subpage: InstanceSubpage,
     _instance_subscription: Subscription,
 }
 
-enum InstanceSubpageType {
-    Quickplay,
-    Logs,
-    Mods,
-}
-
 impl InstancePage {
-    pub fn new(instance_id: InstanceID, data: &DataEntities, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(instance_id: InstanceID, subpage: InstanceSubpageType, data: &DataEntities, breadcrumb: Breadcrumb, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let instance = data.instances.read(cx).entries.get(&instance_id).unwrap().clone();
 
         let _instance_subscription = cx.observe(&instance, |page, instance, cx| {
@@ -40,11 +32,10 @@ impl InstancePage {
             page.title = instance.title().into();
         });
 
-        let subpage = InstanceSubpage::Quickplay(
-            cx.new(|cx| InstanceQuickplaySubpage::new(&instance, data.backend_handle.clone(), window, cx)),
-        );
+        let subpage = subpage.create(&instance, data.backend_handle.clone(), window, cx);
 
         Self {
+            breadcrumb,
             backend_handle: data.backend_handle.clone(),
             title: instance.read(cx).title().into(),
             instance,
@@ -54,37 +45,10 @@ impl InstancePage {
     }
 
     fn set_subpage(&mut self, page_type: InstanceSubpageType, window: &mut Window, cx: &mut Context<Self>) {
-        match page_type {
-            InstanceSubpageType::Quickplay => {
-                if let InstanceSubpage::Quickplay(_) = self.subpage {
-                    return;
-                }
-
-                self.subpage =
-                    InstanceSubpage::Quickplay(cx.new(|cx| {
-                        InstanceQuickplaySubpage::new(&self.instance, self.backend_handle.clone(), window, cx)
-                    }));
-            },
-            InstanceSubpageType::Logs => {
-                if let InstanceSubpage::Logs(_) = self.subpage {
-                    return;
-                }
-
-                self.subpage =
-                    InstanceSubpage::Logs(cx.new(|cx| {
-                        InstanceLogsSubpage::new(&self.instance, self.backend_handle.clone(), window, cx)
-                    }));
-            },
-            InstanceSubpageType::Mods => {
-                if let InstanceSubpage::Mods(_) = self.subpage {
-                    return;
-                }
-
-                self.subpage = InstanceSubpage::Mods(
-                    cx.new(|cx| InstanceModsSubpage::new(&self.instance, self.backend_handle.clone(), window, cx)),
-                );
-            },
+        if page_type == self.subpage.page_type() {
+            return;
         }
+        self.subpage = page_type.create(&self.instance, self.backend_handle.clone(), window, cx);
     }
 }
 
@@ -123,7 +87,8 @@ impl Render for InstancePage {
                 }),
         };
 
-        ui::page(cx, h_flex().gap_8().child(self.title.clone()).child(button))
+        let breadcrumb = self.breadcrumb.clone().child(self.title.clone());
+        ui::page(cx, h_flex().gap_8().child(breadcrumb).child(button))
             .child(
                 TabBar::new("bar")
                     .prefix(div().w_4())
@@ -149,6 +114,35 @@ impl Render for InstancePage {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InstanceSubpageType {
+    Quickplay,
+    Logs,
+    Mods,
+}
+
+impl InstanceSubpageType {
+    pub fn create(
+        self,
+        instance: &Entity<InstanceEntry>,
+        backend_handle: BackendHandle,
+        window: &mut gpui::Window,
+        cx: &mut App
+    ) -> InstanceSubpage {
+        match self {
+            InstanceSubpageType::Quickplay => InstanceSubpage::Quickplay(cx.new(|cx| {
+                InstanceQuickplaySubpage::new(instance, backend_handle, window, cx)
+            })),
+            InstanceSubpageType::Logs => InstanceSubpage::Logs(cx.new(|cx| {
+                InstanceLogsSubpage::new(instance, backend_handle, window, cx)
+            })),
+            InstanceSubpageType::Mods => InstanceSubpage::Mods(cx.new(|cx| {
+                InstanceModsSubpage::new(instance, backend_handle, window, cx)
+            })),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum InstanceSubpage {
     Quickplay(Entity<InstanceQuickplaySubpage>),
@@ -157,6 +151,14 @@ pub enum InstanceSubpage {
 }
 
 impl InstanceSubpage {
+    pub fn page_type(&self) -> InstanceSubpageType {
+        match self {
+            InstanceSubpage::Quickplay(_) => InstanceSubpageType::Quickplay,
+            InstanceSubpage::Logs(_) => InstanceSubpageType::Logs,
+            InstanceSubpage::Mods(_) => InstanceSubpageType::Mods,
+        }
+    }
+
     pub fn into_any_element(self) -> AnyElement {
         match self {
             Self::Quickplay(entity) => entity.into_any_element(),

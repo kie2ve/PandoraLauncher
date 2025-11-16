@@ -8,9 +8,9 @@ use bridge::{
     modal_action::ModalAction,
 };
 use gpui::{prelude::*, *};
-use gpui_component::v_flex;
+use gpui_component::{breadcrumb::Breadcrumb, v_flex};
 
-use crate::{entity::DataEntities, modals, ui::LauncherUI};
+use crate::{entity::DataEntities, modals, ui::{LauncherUI, PageType}};
 
 pub struct LauncherRootGlobal {
     pub root: Entity<LauncherRoot>,
@@ -126,4 +126,19 @@ pub fn update_single_mod(
     });
 
     modals::generic::show_notification(window, cx, "Error downloading update".into(), modal_action);
+}
+
+pub fn switch_page(
+    page: PageType,
+    breadcrumb: Option<Breadcrumb>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    cx.update_global::<LauncherRootGlobal, ()>(|global, cx| {
+        global.root.update(cx, |launcher_root, cx| {
+            launcher_root.ui.update(cx, |ui, cx| {
+                ui.switch_page(page, breadcrumb, window, cx);
+            });
+        });
+    });
 }

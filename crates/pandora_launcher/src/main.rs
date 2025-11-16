@@ -16,5 +16,5 @@ fn main() {
     let (backend_recv, backend_handle, frontend_recv, frontend_handle) = bridge::handle::create_pair();
 
     backend::start(frontend_handle, backend_handle.clone(), backend_recv);
-    frontend::start(panic_message, backend_handle.clone(), frontend_recv);
+    frontend::start(panic_message, backend_handle, frontend_recv);
 }

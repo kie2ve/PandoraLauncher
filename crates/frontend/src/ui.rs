@@ -3,18 +3,15 @@ use std::sync::Arc;
 use bridge::instance::InstanceID;
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Icon, h_flex,
-    resizable::{ResizableState, h_resizable, resizable_panel},
-    sidebar::{Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem},
-    v_flex,
+    breadcrumb::{Breadcrumb, BreadcrumbItem}, h_flex, resizable::{h_resizable, resizable_panel, ResizableState}, sidebar::{Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem}, v_flex, ActiveTheme as _, Icon
 };
 
 use crate::{
     entity::{
         instance::{InstanceAddedEvent, InstanceModifiedEvent, InstanceMovedToTopEvent, InstanceRemovedEvent}, DataEntities
     },
-    pages::{instance::instance_page::InstancePage, instances_page::InstancesPage, modrinth_page::ModrinthSearchPage},
-    png_render_cache,
+    pages::{instance::instance_page::{InstancePage, InstanceSubpageType}, instances_page::InstancesPage, modrinth_page::ModrinthSearchPage},
+    png_render_cache, root,
 };
 
 pub struct LauncherUI {
@@ -35,7 +32,7 @@ pub enum LauncherPage {
         installing_for: Option<InstanceID>,
         page: Entity<ModrinthSearchPage>,
     },
-    InstancePage(InstanceID, Entity<InstancePage>),
+    InstancePage(InstanceID, InstanceSubpageType, Entity<InstancePage>),
 }
 
 impl LauncherPage {
@@ -43,7 +40,7 @@ impl LauncherPage {
         match self {
             LauncherPage::Instances(entity) => entity.into_any_element(),
             LauncherPage::Modrinth { page, .. } => page.into_any_element(),
-            LauncherPage::InstancePage(_, entity) => entity.into_any_element(),
+            LauncherPage::InstancePage(_, _, entity) => entity.into_any_element(),
         }
     }
 
@@ -51,7 +48,7 @@ impl LauncherPage {
         match self {
             LauncherPage::Instances(_) => PageType::Instances,
             LauncherPage::Modrinth { installing_for, .. } => PageType::Modrinth { installing_for: *installing_for },
-            LauncherPage::InstancePage(id, _) => PageType::InstancePage(*id),
+            LauncherPage::InstancePage(id, subpage, _) => PageType::InstancePage(*id, *subpage),
         }
     }
 }
@@ -89,10 +86,10 @@ impl LauncherUI {
         let _instance_removed_subscription =
             cx.subscribe_in::<_, InstanceRemovedEvent>(&data.instances, window, |this, _, event, window, cx| {
                 this.recent_instances.retain(|entry| entry.0 != event.id);
-                if let LauncherPage::InstancePage(id, _) = this.page
+                if let LauncherPage::InstancePage(id, _, _) = this.page
                     && id == event.id
                 {
-                    this.switch_page(PageType::Instances, window, cx);
+                    this.switch_page(PageType::Instances, None, window, cx);
                 }
                 cx.notify();
             });
@@ -118,7 +115,7 @@ impl LauncherUI {
         }
     }
 
-    pub fn switch_page(&mut self, page: PageType, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn switch_page(&mut self, page: PageType, breadcrumb: Option<Breadcrumb>, window: &mut Window, cx: &mut Context<Self>) {
         let data = &self.data;
         match page {
             PageType::Instances => {
@@ -132,18 +129,27 @@ impl LauncherUI {
                 if let LauncherPage::Modrinth { installing_for: current_installing_for, .. } = self.page && current_installing_for == installing_for {
                     return;
                 }
-                let page = cx.new(|cx| ModrinthSearchPage::new(data, installing_for, window, cx));
+                let breadcrumb = breadcrumb.unwrap_or_else(|| Breadcrumb::new().text_xl());
+                let page = cx.new(|cx| {
+                    ModrinthSearchPage::new(data, installing_for, breadcrumb, window, cx)
+                });
                 self.page = LauncherPage::Modrinth {
                     installing_for,
                     page,
                 };
                 cx.notify();
             },
-            PageType::InstancePage(id) => {
+            PageType::InstancePage(id, subpage) => {
                 if let LauncherPage::InstancePage(current_id, ..) = self.page && current_id == id {
                     return;
                 }
-                self.page = LauncherPage::InstancePage(id, cx.new(|cx| InstancePage::new(id, data, window, cx)));
+                let instances_item = BreadcrumbItem::new("Instances").on_click(|_, window, cx| {
+                    root::switch_page(PageType::Instances, None, window, cx);
+                });
+                let breadcrumb = breadcrumb.unwrap_or_else(|| Breadcrumb::new().text_xl().child(instances_item));
+                self.page = LauncherPage::InstancePage(id, subpage, cx.new(|cx| {
+                    InstancePage::new(id, subpage, data, breadcrumb, window, cx)
+                }));
                 cx.notify();
             },
         }
@@ -156,7 +162,7 @@ pub enum PageType {
     Modrinth {
         installing_for: Option<InstanceID>,
     },
-    InstancePage(InstanceID),
+    InstancePage(InstanceID, InstanceSubpageType),
 }
 
 impl Render for LauncherUI {
@@ -168,7 +174,7 @@ impl Render for LauncherUI {
                 SidebarMenuItem::new("Instances")
                     .active(page_type == PageType::Instances)
                     .on_click(cx.listener(|launcher, _, window, cx| {
-                        launcher.switch_page(PageType::Instances, window, cx);
+                        launcher.switch_page(PageType::Instances, None, window, cx);
                     })),
                 // SidebarMenuItem::new("Mods"),
             ]),
@@ -178,7 +184,7 @@ impl Render for LauncherUI {
             SidebarMenu::new().children([SidebarMenuItem::new("Modrinth")
                 .active(page_type == PageType::Modrinth { installing_for: None })
                 .on_click(cx.listener(|launcher, _, window, cx| {
-                    launcher.switch_page(PageType::Modrinth { installing_for: None }, window, cx);
+                    launcher.switch_page(PageType::Modrinth { installing_for: None }, None, window, cx);
                 }))]),
         );
 
@@ -192,10 +198,15 @@ impl Render for LauncherUI {
                 self.recent_instances.iter().map(|(id, name)| {
                     let name = name.clone();
                     let id = *id;
+                    let active = if let PageType::InstancePage(page_id, _) = page_type {
+                        page_id == id
+                    } else {
+                        false
+                    };
                     SidebarMenuItem::new(name)
-                        .active(page_type == PageType::InstancePage(id))
+                        .active(active)
                         .on_click(cx.listener(move |launcher, _, window, cx| {
-                            launcher.switch_page(PageType::InstancePage(id), window, cx);
+                            launcher.switch_page(PageType::InstancePage(id, InstanceSubpageType::Quickplay), None, window, cx);
                         }))
                 }),
             ));
