@@ -1,0 +1,48 @@
+name: CD
+
+on:
+  release:
+    types:
+      - created
+
+jobs:
+  release:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform:
+          - os_name: Linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binext: ""
+          - os_name: Windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binext: .exe
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install musl-tools on Linux
+        run: sudo apt-get update --yes && sudo apt-get install --yes musl-tools
+        if: contains(matrix.platform.os, 'ubuntu')
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Run build command
+        run: cargo build --release --target ${{ matrix.platform.target }}
+
+      - name: Strip debug information
+        run: strip target/${{ matrix.platform.target }}/release/pandora-launcher${{ matrix.platform.binext }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PandoraLauncher-${{ matrix.platform.os_name }}${{ matrix.platform.binext }}
+          path: target/${{ matrix.platform.target }}/release/pandora-launcher${{ matrix.platform.binext }}
