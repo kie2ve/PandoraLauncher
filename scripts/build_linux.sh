@@ -19,7 +19,7 @@ cargo packager --config '{'\
 '  "version": "'"$1"'",'\
 '  "identifier": "com.moulberry.pandoralauncher",'\
 '  "resources": [],'\
-'  "binaries": [{ "path": "PandoraLauncher", "main": true }],'\
+'  "binaries": [{ "path": "PandoraLauncher-Linux", "main": true }],'\
 '  "icons": ["package/icon_32x32.png"]'\
 '}'
 
