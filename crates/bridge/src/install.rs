@@ -1,14 +1,19 @@
 use std::{path::{Path, PathBuf}, sync::Arc};
 
-use schema::content::ContentSource;
+use schema::{content::ContentSource, loader::Loader};
+use ustr::Ustr;
 
 use crate::instance::InstanceID;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum InstallTarget {
     Instance(InstanceID),
     Library,
-    NewInstance,
+    NewInstance {
+        loader: Loader,
+        name: Arc<str>,
+        minecraft_version: Option<Arc<str>>,
+    },
 }
 
 #[derive(Debug, Clone)]

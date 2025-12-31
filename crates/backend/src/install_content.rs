@@ -1,16 +1,14 @@
 use std::{ffi::OsString, io::Write, path::{Path, PathBuf}, sync::{atomic::AtomicBool, Arc}};
 
 use bridge::{
-    install::{ContentDownload, ContentInstall, ContentInstallFile},
-    message::MessageToFrontend,
-    modal_action::{ModalAction, ProgressTracker, ProgressTrackerFinishType},
+    install::{ContentDownload, ContentInstall, ContentInstallFile}, instance::ModSummary, message::MessageToFrontend, modal_action::{ModalAction, ProgressTracker, ProgressTrackerFinishType}
 };
 use reqwest::StatusCode;
 use schema::content::ContentSource;
 use sha1::{Digest, Sha1};
 use tokio::io::AsyncWriteExt;
 
-use crate::BackendState;
+use crate::{metadata::items::MinecraftVersionManifestMetadataItem, BackendState};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ContentInstallError {
@@ -35,6 +33,7 @@ struct InstallFromContentLibrary {
     replace: Option<Arc<Path>>,
     hash: [u8; 20],
     content_file: ContentInstallFile,
+    mod_summary: Option<Arc<ModSummary>>,
 }
 
 impl BackendState {
@@ -94,6 +93,7 @@ impl BackendState {
                             tracker.set_finished(ProgressTrackerFinishType::Fast);
                             tracker.notify();
                             return Ok(InstallFromContentLibrary {
+                                mod_summary: self.mod_metadata_manager.get_path(&path),
                                 from: path,
                                 replace: content_file.replace_old.clone(),
                                 hash: expected_hash,
@@ -147,8 +147,8 @@ impl BackendState {
                             }
                         }
 
-                        self.mod_metadata_manager.file_downloaded(expected_hash);
                         Ok(InstallFromContentLibrary {
+                            mod_summary: self.mod_metadata_manager.get_path(&path),
                             from: path,
                             replace: content_file.replace_old.clone(),
                             hash: expected_hash,
@@ -194,7 +194,6 @@ impl BackendState {
 
                         if !valid_hash_on_disk {
                             tokio::fs::write(&path, &data).await?;
-                            self.mod_metadata_manager.file_downloaded(hash);
                         }
 
                         tracker.set_count(3);
@@ -204,6 +203,7 @@ impl BackendState {
                             replace: content_file.replace_old.clone(),
                             hash: hash.into(),
                             content_file: content_file.clone(),
+                            mod_summary: self.mod_metadata_manager.get_bytes(&data)
                         });
                     },
                 }
@@ -222,7 +222,18 @@ impl BackendState {
                         }
                     },
                     bridge::install::InstallTarget::Library => {},
-                    bridge::install::InstallTarget::NewInstance => todo!(),
+                    bridge::install::InstallTarget::NewInstance { loader, name, mut minecraft_version } => {
+                        if minecraft_version.is_none() {
+                            if let Ok(meta) = self.meta.fetch(&MinecraftVersionManifestMetadataItem).await {
+                                minecraft_version = Some(meta.latest.release.into());
+                            }
+                        }
+
+                        if let Some(minecraft_version) = minecraft_version {
+                            instance_dir = self.create_instance_sanitized(&name, &minecraft_version, loader).await
+                                .map(|v| v.join(".minecraft").into());
+                        }
+                    },
                 }
 
                 let sources = files.iter()

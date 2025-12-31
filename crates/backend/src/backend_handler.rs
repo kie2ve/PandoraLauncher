@@ -52,32 +52,7 @@ impl BackendState {
                 tokio::task::spawn(self.clone().load_instance_mods(id));
             },
             MessageToBackend::CreateInstance { name, version, loader } => {
-                if !crate::is_single_component_path(&name) {
-                    self.send.send_warning(format!("Unable to create instance, name must not be a path: {}", name));
-                    return;
-                }
-                if !sanitize_filename::is_sanitized_with_options(&*name, sanitize_filename::OptionsForCheck { windows: true, ..Default::default() }) {
-                    self.send.send_warning(format!("Unable to create instance, name is invalid: {}", name));
-                    return;
-                }
-                if self.instance_state.read().instances.iter().any(|i| i.name == name) {
-                    self.send.send_warning("Unable to create instance, name is already used".to_string());
-                    return;
-                }
-
-                let instance_dir = self.directories.instances_dir.join(name.as_str());
-
-                let _ = tokio::fs::create_dir_all(&instance_dir).await;
-
-                self.watch_filesystem(&self.directories.instances_dir.clone(), WatchTarget::InstancesDir);
-
-                let instance_info = InstanceInfo {
-                    minecraft_version: version,
-                    loader,
-                };
-
-                let info_path = instance_dir.join("info_v1.json");
-                tokio::fs::write(info_path, serde_json::to_string_pretty(&instance_info).unwrap()).await.unwrap();
+                self.create_instance(&name, &version, loader).await;
             },
             MessageToBackend::DeleteInstance { id } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
@@ -88,23 +63,7 @@ impl BackendState {
                 }
             },
             MessageToBackend::RenameInstance { id, name } => {
-                if !crate::is_single_component_path(&name) {
-                    self.send.send_warning(format!("Unable to rename instance, name must not be a path: {}", name));
-                    return;
-                }
-                if !sanitize_filename::is_sanitized_with_options(&*name, sanitize_filename::OptionsForCheck { windows: true, ..Default::default() }) {
-                    self.send.send_warning(format!("Unable to rename instance, name is invalid: {}", name));
-                    return;
-                }
-
-                let new_instance_dir = self.directories.instances_dir.join(name.as_str());
-
-                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                    let result = std::fs::rename(&instance.root_path, new_instance_dir);
-                    if let Err(err) = result {
-                        self.send.send_error(format!("Unable to rename instance folder: {}", err));
-                    }
-                }
+                self.rename_instance(id, &name).await;
             },
             MessageToBackend::KillInstance { id } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, fs::File, io::{Cursor, Read}, path::{Path, PathBuf}, sync::{atomic::AtomicBool, Arc}
+    collections::HashMap, fs::File, io::{Cursor, Read, Seek, Write}, path::{Path, PathBuf}, sync::{atomic::AtomicBool, Arc}
 };
 
 use bridge::instance::{AtomicContentUpdateStatus, ContentUpdateStatus, LoaderSpecificModSummary, ModSummary};
@@ -44,15 +44,6 @@ pub struct ModMetadataManager {
 }
 
 impl ModMetadataManager {
-    pub fn file_downloaded(&self, hash: [u8; 20]) {
-        if let Some(parents) = self.parents_by_missing_child.write().remove(&hash) {
-            let mut by_hash = self.by_hash.write();
-            for parent in parents {
-                by_hash.remove(&parent);
-            }
-        }
-    }
-
     pub fn load(content_meta_dir: Arc<Path>, content_library_dir: Arc<Path>) -> Self {
         let sources_json = content_meta_dir.join("sources.json");
 
@@ -96,12 +87,15 @@ impl ModMetadataManager {
         }
     }
 
-    pub fn get(self: &Arc<Self>, file: &mut std::fs::File) -> Option<Arc<ModSummary>> {
+    pub fn get_path(self: &Arc<Self>, path: &Path) -> Option<Arc<ModSummary>> {
+        let mut file = std::fs::File::open(path).ok()?;
+        self.get_file(&mut file)
+    }
+
+    pub fn get_file(self: &Arc<Self>, file: &mut std::fs::File) -> Option<Arc<ModSummary>> {
         let mut hasher = Sha1::new();
         let _ = std::io::copy(file, &mut hasher).ok()?;
         let actual_hash: [u8; 20] = hasher.finalize().into();
-
-        // todo: cache on disk?
 
         if let Some(summary) = self.by_hash.read().get(&actual_hash) {
             return summary.clone();
@@ -109,12 +103,40 @@ impl ModMetadataManager {
 
         let summary = self.load_mod_summary(actual_hash, file, true);
 
-        self.by_hash.write().insert(actual_hash, summary.clone());
+        self.put(actual_hash, summary.clone());
 
         summary
     }
 
-    fn load_mod_summary(self: &Arc<Self>, hash: [u8; 20], file: &mut std::fs::File, allow_children: bool) -> Option<Arc<ModSummary>> {
+    pub fn get_bytes(self: &Arc<Self>, bytes: &[u8]) -> Option<Arc<ModSummary>> {
+        let mut hasher = Sha1::new();
+        hasher.write_all(bytes).ok()?;
+        let actual_hash: [u8; 20] = hasher.finalize().into();
+
+        if let Some(summary) = self.by_hash.read().get(&actual_hash) {
+            return summary.clone();
+        }
+
+        let summary = self.load_mod_summary(actual_hash, &mut Cursor::new(bytes), true);
+
+        self.put(actual_hash, summary.clone());
+
+        summary
+    }
+
+    fn put(self: &Arc<Self>, hash: [u8; 20], summary: Option<Arc<ModSummary>>) {
+        self.by_hash.write().insert(hash, summary.clone());
+
+        if let Some(parents) = self.parents_by_missing_child.write().remove(&hash) {
+            // Remove cached summary of parent, so it can be recalculated next time it is requested
+            let mut by_hash = self.by_hash.write();
+            for parent in parents {
+                by_hash.remove(&parent);
+            }
+        }
+    }
+
+    fn load_mod_summary<R: Read + Seek>(self: &Arc<Self>, hash: [u8; 20], file: &mut R, allow_children: bool) -> Option<Arc<ModSummary>> {
         let archive = zip::ZipArchive::new(file).ok()?;
 
         if archive.index_for_name("fabric.mod.json").is_some() {
@@ -126,7 +148,7 @@ impl ModMetadataManager {
         }
     }
 
-    fn load_fabric_mod(hash: [u8; 20], mut archive: ZipArchive<&mut File>) -> Option<Arc<ModSummary>> {
+    fn load_fabric_mod<R: Read + Seek>(hash: [u8; 20], mut archive: ZipArchive<&mut R>) -> Option<Arc<ModSummary>> {
         let mut file = match archive.by_name("fabric.mod.json") {
             Ok(file) => file,
             Err(..) => {
@@ -137,7 +159,7 @@ impl ModMetadataManager {
         let mut file_content = String::with_capacity(file.size() as usize);
         file.read_to_string(&mut file_content).ok()?;
 
-        // Some mods violate the JSON spec by using raw newline characters (e.g. BetterGrassify)
+        // Some mods violate the JSON spec by using raw newline characters inside strings (e.g. BetterGrassify)
         file_content = file_content.replace("\n", " ");
 
         let fabric_mod_json: FabricModJson = serde_json::from_str(&file_content).inspect_err(|e| {
@@ -197,7 +219,7 @@ impl ModMetadataManager {
         }))
     }
 
-    fn load_modrinth_modpack(self: &Arc<Self>, hash: [u8; 20], mut archive: ZipArchive<&mut File>) -> Option<Arc<ModSummary>> {
+    fn load_modrinth_modpack<R: Read + Seek>(self: &Arc<Self>, hash: [u8; 20], mut archive: ZipArchive<&mut R>) -> Option<Arc<ModSummary>> {
         let file = match archive.by_name("modrinth.index.json") {
             Ok(file) => file,
             Err(..) => {
@@ -256,11 +278,9 @@ impl ModMetadataManager {
                         return None;
                     };
 
-                    let by_hash = this.by_hash.read();
-                    if let Some(cached) = by_hash.get(&file_hash).cloned() {
+                    if let Some(cached) = this.by_hash.read().get(&file_hash).cloned() {
                         return cached;
                     }
-                    drop(by_hash);
 
                     let file_hash_as_str = hex::encode(file_hash);
 
@@ -272,8 +292,7 @@ impl ModMetadataManager {
 
                     if let Ok(mut file) = std::fs::File::open(file) {
                         let summary = this.load_mod_summary(file_hash, &mut file, false);
-                        let mut by_hash = this.by_hash.write();
-                        by_hash.insert(file_hash, summary.clone());
+                        this.put(file_hash, summary.clone());
                         return summary;
                     }
 
@@ -303,7 +322,7 @@ impl ModMetadataManager {
     }
 }
 
-fn load_icon(mut icon_file: ZipFile<'_, &mut File>) -> Option<Arc<[u8]>> {
+fn load_icon<R: Read + Seek>(mut icon_file: ZipFile<'_, &mut R>) -> Option<Arc<[u8]>> {
     let mut icon_bytes = Vec::with_capacity(icon_file.size() as usize);
     let Ok(_) = icon_file.read_to_end(&mut icon_bytes) else {
         return None;

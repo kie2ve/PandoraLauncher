@@ -720,7 +720,7 @@ fn create_instance_mod_summary(path: &Path, mod_metadata_manager: &Arc<ModMetada
         return None;
     };
 
-    let Some(summary) = mod_metadata_manager.get(&mut file) else {
+    let Some(summary) = mod_metadata_manager.get_file(&mut file) else {
         return None;
     };
 

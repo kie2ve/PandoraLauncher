@@ -34,7 +34,9 @@ struct VersionMatrixLoaders {
 }
 
 struct InstallDialog {
+    title: SharedString,
     name: SharedString,
+
     project_versions: Arc<[ModrinthProjectVersion]>,
     data: DataEntities,
     project_type: ModrinthProjectType,
@@ -67,19 +69,17 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let title = SharedString::new(format!("Install {}", name));
-
     let project_versions = FrontendMetadata::request(
         &data.metadata,
         MetadataRequest::ModrinthProjectVersions(ModrinthProjectVersionsRequest { project_id }),
         cx,
     );
 
-    open_from_entity(title, project_versions, project_type, install_for, data.clone(), window, cx);
+    open_from_entity(SharedString::new(name), project_versions, project_type, install_for, data.clone(), window, cx);
 }
 
 fn open_from_entity(
-    title: SharedString,
+    name: SharedString,
     project_versions: Entity<FrontendMetadataState>,
     project_type: ModrinthProjectType,
     install_for: Option<InstanceID>,
@@ -87,13 +87,14 @@ fn open_from_entity(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let title = SharedString::new(format!("Install {}", name));
+
     let result: FrontendMetadataResult<ModrinthProjectVersionsResult> = project_versions.read(cx).result();
     match result {
         FrontendMetadataResult::Loading => {
-            let title2 = title.clone();
             let _subscription = window.observe(&project_versions, cx, move |project_versions, window, cx| {
                 window.close_all_dialogs(cx);
-                open_from_entity(title2.clone(), project_versions, project_type, install_for, data.clone(), window, cx);
+                open_from_entity(name.clone(), project_versions, project_type, install_for, data.clone(), window, cx);
             });
             window.open_dialog(cx, move |dialog, _, _| {
                 let _ = &_subscription;
@@ -186,7 +187,8 @@ fn open_from_entity(
                     None
                 };
                 let install_dialog = InstallDialog {
-                    name: title,
+                    title,
+                    name: name.into(),
                     project_versions: valid_project_versions.into(),
                     data,
                     project_type,
@@ -241,9 +243,9 @@ fn open_from_entity(
                     None
                 };
 
-                let title = title.clone();
                 let install_dialog = InstallDialog {
-                    name: title,
+                    title,
+                    name: name.into(),
                     project_versions: valid_project_versions.into(),
                     data,
                     project_type,
@@ -286,16 +288,9 @@ impl InstallDialog {
     }
 
     fn render(&mut self, modal: Dialog, window: &mut Window, cx: &mut Context<Self>) -> Dialog {
-        let modal = modal.title(self.name.clone());
+        let modal = modal.title(self.title.clone());
 
         if self.target.is_none() {
-            let add_to_library_label = match self.project_type {
-                ModrinthProjectType::Mod => "Add to mod library",
-                ModrinthProjectType::Modpack => "Add to mod library",
-                ModrinthProjectType::Resourcepack => "Add to resourcepack library",
-                ModrinthProjectType::Shader => "Add to shader library",
-                ModrinthProjectType::Other => "Add to library",
-            };
             let create_instance_label = match self.project_type {
                 ModrinthProjectType::Mod => "Create new instance with this mod",
                 ModrinthProjectType::Modpack => "Create new instance with this modpack",
@@ -342,15 +337,13 @@ impl InstallDialog {
 
                     content.child(button_and_dropdown).child("— OR —")
                 })
-                .child(Button::new("library").success().label(add_to_library_label).on_click(cx.listener(
+                .child(Button::new("create").success().label(create_instance_label).on_click(cx.listener(
                     |this, _, _, _| {
-                        this.target = Some(InstallTarget::Library);
-                    },
-                )))
-                .child("— OR —")
-                .child(Button::new("create").warning().label(create_instance_label).on_click(cx.listener(
-                    |this, _, _, _| {
-                        this.target = Some(InstallTarget::NewInstance);
+                        this.target = Some(InstallTarget::NewInstance {
+                            loader: Loader::Vanilla,
+                            name: "New Instance".into(),
+                            minecraft_version: None,
+                        });
                     },
                 )));
 
@@ -470,7 +463,7 @@ impl InstallDialog {
         self.last_selected_loader = selected_loader.clone();
 
         if (self.mod_version_select_state.is_none() || game_version_changed || loader_changed)
-            && let Some(selected_game_version) = selected_minecraft_version
+            && let Some(selected_game_version) = selected_minecraft_version.clone()
             && let Some(selected_loader) = self.last_selected_loader.clone()
         {
             let selected_game_version = selected_game_version.as_str();
@@ -608,8 +601,26 @@ impl InstallDialog {
                                 ModrinthProjectType::Other => panic!("Don't know how to install this file type"),
                             };
 
+                            let mut target = this.target.clone().unwrap();
+
+                            if let InstallTarget::NewInstance { loader, name, minecraft_version } = &mut target {
+                                if let Some(selected_loader) = &selected_loader {
+                                    let modrinth_loader = ModrinthLoader::from_name(selected_loader);
+                                    match modrinth_loader {
+                                        ModrinthLoader::Fabric => *loader = Loader::Fabric,
+                                        ModrinthLoader::Forge => *loader = Loader::Forge,
+                                        ModrinthLoader::NeoForge => *loader = Loader::NeoForge,
+                                        _ => {}
+                                    }
+                                }
+                                if let Some(selected_minecraft_version) = &selected_minecraft_version {
+                                    *minecraft_version = Some(selected_minecraft_version.as_str().into());
+                                }
+                                *name = this.name.as_str().into();
+                            }
+
                             let content_install = ContentInstall {
-                                target: this.target.unwrap(),
+                                target,
                                 files: [ContentInstallFile {
                                     replace_old: None,
                                     path: path.into(),

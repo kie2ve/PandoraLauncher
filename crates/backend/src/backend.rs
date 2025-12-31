@@ -16,12 +16,13 @@ use enumset::EnumSet;
 use image::imageops::FilterType;
 use parking_lot::RwLock;
 use reqwest::{StatusCode, redirect::Policy};
-use schema::modrinth::ModrinthSideRequirement;
+use schema::{loader::Loader, modrinth::ModrinthSideRequirement};
 use sha1::{Digest, Sha1};
 use tokio::sync::{mpsc::Receiver, OnceCell};
+use ustr::Ustr;
 
 use crate::{
-    account::BackendAccountInfo, config::BackendConfig, directories::LauncherDirectories, id_slab::IdSlab, instance::Instance, launch::Launcher, metadata::{items::MinecraftVersionManifestMetadataItem, manager::MetadataManager}, mod_metadata::ModMetadataManager
+    account::BackendAccountInfo, config::BackendConfig, directories::LauncherDirectories, id_slab::IdSlab, instance::{Instance, InstanceInfo}, launch::Launcher, metadata::{items::MinecraftVersionManifestMetadataItem, manager::MetadataManager}, mod_metadata::ModMetadataManager
 };
 
 pub fn start(send: FrontendHandle, self_handle: BackendHandle, recv: BackendReceiver) {
@@ -822,6 +823,78 @@ impl BackendState {
         }
 
         result.map(|(worlds, _)| worlds)
+    }
+
+    pub async fn create_instance_sanitized(&self, name: &str, version: &str, loader: Loader) -> Option<PathBuf> {
+        let mut name = sanitize_filename::sanitize_with_options(name, sanitize_filename::Options { windows: true, ..Default::default() });
+
+        if self.instance_state.read().instances.iter().any(|i| i.name == name) {
+            let original_name = name.clone();
+            for i in 1..32 {
+                let new_name = format!("{original_name} ({i})");
+                if !self.instance_state.read().instances.iter().any(|i| i.name == new_name) {
+                    name = new_name;
+                    break;
+                }
+            }
+        }
+
+        return self.create_instance(&name, version, loader).await;
+    }
+
+    pub async fn create_instance(&self, name: &str, version: &str, loader: Loader) -> Option<PathBuf> {
+        if !crate::is_single_component_path(&name) {
+            self.send.send_warning(format!("Unable to create instance, name must not be a path: {}", name));
+            return None;
+        }
+        if !sanitize_filename::is_sanitized_with_options(&*name, sanitize_filename::OptionsForCheck { windows: true, ..Default::default() }) {
+            self.send.send_warning(format!("Unable to create instance, name is invalid: {}", name));
+            return None;
+        }
+        if self.instance_state.read().instances.iter().any(|i| i.name == name) {
+            self.send.send_warning("Unable to create instance, name is already used".to_string());
+            return None;
+        }
+
+        self.watch_filesystem(&self.directories.instances_dir.clone(), WatchTarget::InstancesDir);
+
+        let instance_dir = self.directories.instances_dir.join(name);
+
+        let _ = tokio::fs::create_dir_all(&instance_dir).await;
+
+        let instance_info = InstanceInfo {
+            minecraft_version: Ustr::from(version),
+            loader,
+        };
+
+        let info_path = instance_dir.join("info_v1.json");
+        tokio::fs::write(info_path, serde_json::to_string_pretty(&instance_info).unwrap()).await.unwrap();
+
+        Some(instance_dir.clone())
+    }
+
+    pub async fn rename_instance(&self, id: InstanceID, name: &str) {
+        if !crate::is_single_component_path(&name) {
+            self.send.send_warning(format!("Unable to rename instance, name must not be a path: {}", name));
+            return;
+        }
+        if !sanitize_filename::is_sanitized_with_options(&*name, sanitize_filename::OptionsForCheck { windows: true, ..Default::default() }) {
+            self.send.send_warning(format!("Unable to rename instance, name is invalid: {}", name));
+            return;
+        }
+        if self.instance_state.read().instances.iter().any(|i| i.name == name) {
+            self.send.send_warning("Unable to rename instance, name is already used".to_string());
+            return;
+        }
+
+        let new_instance_dir = self.directories.instances_dir.join(name);
+
+        if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+            let result = std::fs::rename(&instance.root_path, new_instance_dir);
+            if let Err(err) = result {
+                self.send.send_error(format!("Unable to rename instance folder: {}", err));
+            }
+        }
     }
 }
 
