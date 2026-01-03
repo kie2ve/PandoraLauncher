@@ -65,6 +65,13 @@ impl BackendState {
             MessageToBackend::RenameInstance { id, name } => {
                 self.rename_instance(id, &name).await;
             },
+            MessageToBackend::SetInstanceMemory { id, memory } => {
+                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                    instance.configuration.modify(|configuration| {
+                        configuration.memory = memory;
+                    });
+                }
+            },
             MessageToBackend::KillInstance { id } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                     if let Some(mut child) = instance.child.take() {
@@ -126,7 +133,7 @@ impl BackendState {
                     });
                     self.send.send(instance.create_modify_message_with_status(InstanceStatus::Launching));
 
-                    (instance.dot_minecraft_path.clone(), instance.configuration.clone())
+                    (instance.dot_minecraft_path.clone(), instance.configuration.get().clone())
                 } else {
                     self.send.send_error("Can't launch instance, unknown id");
                     modal_action.set_error_message("Can't launch instance, unknown id".into());
@@ -141,7 +148,7 @@ impl BackendState {
 
                 if matches!(result, Err(LaunchError::CancelledByUser)) {
                     self.send.send(MessageToFrontend::CloseModal);
-                    if let Some(instance) = self.instance_state.read().instances.get(id) {
+                    if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                         self.send.send(instance.create_modify_message());
                     }
                     return;
@@ -162,7 +169,7 @@ impl BackendState {
                     },
                 }
 
-                if let Some(instance) = self.instance_state.read().instances.get(id) {
+                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                     self.send.send(instance.create_modify_message());
                 }
 
@@ -238,8 +245,9 @@ impl BackendState {
                 instance_state.reload_mods_immediately.insert(id);
             },
             MessageToBackend::UpdateCheck { instance: id, modal_action } => {
-                let (loader, version) = if let Some(instance) = self.instance_state.read().instances.get(id) {
-                    (instance.configuration.loader, instance.configuration.minecraft_version)
+                let (loader, version) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                    let configuration = instance.configuration.get();
+                    (configuration.loader, configuration.minecraft_version)
                 } else {
                     self.send.send_error("Can't update instance, unknown id");
                     modal_action.set_error_message("Can't update instance, unknown id".into());

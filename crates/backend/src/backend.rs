@@ -212,7 +212,7 @@ impl BackendState {
 
         paths_with_time.sort_by_key(|(_, time)| *time);
         for (path, _) in paths_with_time {
-            let success = self.load_instance_from_path(&path, true, false).await;
+            let success = self.load_instance_from_path(&path, true, false);
             if !success {
                 self.watch_filesystem(&path, WatchTarget::InvalidInstanceDir);
             }
@@ -232,8 +232,8 @@ impl BackendState {
         }
     }
 
-    pub async fn load_instance_from_path(&mut self, path: &Path, mut show_errors: bool, show_success: bool) -> bool {
-        let instance = Instance::load_from_folder(&path).await;
+    pub fn load_instance_from_path(&mut self, path: &Path, mut show_errors: bool, show_success: bool) -> bool {
+        let instance = Instance::load_from_folder(&path);
 
         let instance_id = {
             let mut instance_state_guard = self.instance_state.write();
@@ -289,7 +289,7 @@ impl BackendState {
                 id: instance.id,
                 name: instance.name,
                 dot_minecraft_folder: instance.dot_minecraft_path.clone(),
-                configuration: instance.configuration.clone(),
+                configuration: instance.configuration.get().clone(),
                 worlds_state: Arc::clone(&instance.worlds_state),
                 servers_state: Arc::clone(&instance.servers_state),
                 mods_state: Arc::clone(&instance.mods_state),
@@ -910,7 +910,7 @@ impl BackendState {
         };
 
         let info_path = instance_dir.join("info_v1.json");
-        crate::write_safe(&info_path, serde_json::to_string_pretty(&instance_info).unwrap().as_bytes()).unwrap();
+        crate::write_safe(&info_path, serde_json::to_string(&instance_info).unwrap().as_bytes()).unwrap();
 
         Some(instance_dir.clone())
     }

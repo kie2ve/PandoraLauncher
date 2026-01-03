@@ -300,7 +300,7 @@ impl BackendState {
             }
             WatchTarget::InstancesDir => {
                 if path.is_dir() {
-                    let success = self.load_instance_from_path(path, false, true).await;
+                    let success = self.load_instance_from_path(path, false, true);
                     if !success {
                         self.watch_filesystem(path, WatchTarget::InvalidInstanceDir);
                     }
@@ -311,7 +311,12 @@ impl BackendState {
                     return;
                 };
                 if file_name == "info_v1.json" {
-                    self.load_instance_from_path(parent_path, true, true).await;
+                    if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                        instance.configuration.mark_changed(&path);
+                        self.send.send(instance.create_modify_message());
+                    } else {
+                        self.load_instance_from_path(parent_path, true, true);
+                    }
                 } else if file_name == ".minecraft"
                     && let Some(instance) = self.instance_state.write().instances.get_mut(id)
                 {
@@ -361,7 +366,7 @@ impl BackendState {
                     return;
                 };
                 if file_name == "info_v1.json" {
-                    self.load_instance_from_path(parent_path, true, true).await;
+                    self.load_instance_from_path(parent_path, true, true);
                 }
             },
             WatchTarget::InstanceWorldDir { id } => {

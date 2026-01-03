@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 
 use ustr::Ustr;
 
-use crate::{id_slab::{GetId, Id}, mod_metadata::ModMetadataManager, BackendStateInstances};
+use crate::{id_slab::{GetId, Id}, mod_metadata::ModMetadataManager, persistent::Persistent, BackendStateInstances, IoOrSerializationError};
 
 #[derive(Debug)]
 pub struct Instance {
@@ -30,7 +30,7 @@ pub struct Instance {
     pub saves_path: Arc<Path>,
     pub mods_path: Arc<Path>,
     pub name: Ustr,
-    pub configuration: InstanceConfiguration,
+    pub configuration: Persistent<InstanceConfiguration>,
 
     pub child: Option<Child>,
 
@@ -80,6 +80,15 @@ pub enum InstanceLoadError {
     IoError(#[from] std::io::Error),
     #[error("A serialization error occured while trying to read the instance")]
     SerdeError(#[from] serde_json::Error),
+}
+
+impl From<IoOrSerializationError> for InstanceLoadError {
+    fn from(value: IoOrSerializationError) -> Self {
+        match value {
+            IoOrSerializationError::Io(error) => Self::IoError(error),
+            IoOrSerializationError::Serialization(error) => Self::SerdeError(error),
+        }
+    }
 }
 
 impl Instance {
@@ -529,16 +538,15 @@ impl Instance {
         summaries
     }
 
-    pub async fn load_from_folder(path: impl AsRef<Path>) -> Result<Self, InstanceLoadError> {
+    pub fn load_from_folder(path: impl AsRef<Path>) -> Result<Self, InstanceLoadError> {
         let path = path.as_ref();
         if !path.is_dir() {
             return Err(InstanceLoadError::NotADirectory);
         }
 
-        let info_path = path.join("info_v1.json");
-        let file = tokio::fs::read(&info_path).await?;
+        let info_path: Arc<Path> = path.join("info_v1.json").into();
 
-        let instance_info: InstanceConfiguration = serde_json::from_slice(&file)?;
+        let instance_info: Persistent<InstanceConfiguration> = Persistent::try_load(info_path.clone())?;
 
         let mut dot_minecraft_path = path.to_owned();
         dot_minecraft_path.push(".minecraft");
@@ -658,7 +666,7 @@ impl Instance {
 
         self.root_path = new.root_path;
         self.name = new.name;
-        self.configuration = new.configuration.clone();
+        self.configuration = new.configuration;
     }
 
     pub fn status(&self) -> InstanceStatus {
@@ -669,16 +677,16 @@ impl Instance {
         }
     }
 
-    pub fn create_modify_message(&self) -> MessageToFrontend {
+    pub fn create_modify_message(&mut self) -> MessageToFrontend {
         self.create_modify_message_with_status(self.status())
     }
 
-    pub fn create_modify_message_with_status(&self, status: InstanceStatus) -> MessageToFrontend {
+    pub fn create_modify_message_with_status(&mut self, status: InstanceStatus) -> MessageToFrontend {
         MessageToFrontend::InstanceModified {
             id: self.id,
             name: self.name,
             dot_minecraft_folder: self.dot_minecraft_path.clone(),
-            configuration: self.configuration.clone(),
+            configuration: self.configuration.get().clone(),
             status,
         }
     }

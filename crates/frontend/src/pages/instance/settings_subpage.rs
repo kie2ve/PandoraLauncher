@@ -1,5 +1,5 @@
-use std::{path::{Path, PathBuf}, sync::{
-    atomic::{AtomicUsize, Ordering}, Arc, Mutex
+use std::{path::{Path, PathBuf}, rc::Rc, sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex
 }};
 
 use bridge::{
@@ -10,6 +10,7 @@ use gpui_component::{
     button::{Button, ButtonVariants}, checkbox::Checkbox, h_flex, input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent}, list::{ListDelegate, ListItem, ListState}, select::{Select, SelectEvent, SelectState}, spinner::Spinner, switch::Switch, v_flex, ActiveTheme as _, Disableable, Icon, IconName, IndexPath, Sizable
 };
 use rustc_hash::FxHashSet;
+use schema::instance::InstanceMemoryConfiguration;
 
 use crate::{component::{error_alert::ErrorAlert, named_dropdown::{NamedDropdown, NamedDropdownItem}, readonly_text_field::{ReadonlyTextField, ReadonlyTextFieldWithControls}}, entity::instance::InstanceEntry, png_render_cache, root};
 
@@ -22,7 +23,9 @@ enum NewNameChangeState {
 
 pub struct InstanceSettingsSubpage {
     instance: Entity<InstanceEntry>,
+    instance_id: InstanceID,
     new_name_input_state: Entity<InputState>,
+    memory_override_enabled: bool,
     memory_min_input_state: Entity<InputState>,
     memory_max_input_state: Entity<InputState>,
     new_name_change_state: NewNameChangeState,
@@ -39,14 +42,32 @@ impl InstanceSettingsSubpage {
         let new_name_input_state = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&new_name_input_state, Self::on_new_name_input).detach();
 
-        let memory_min_input_state = cx.new(|cx| InputState::new(window, cx).default_value("512"));
+        let entry = instance.read(cx);
+        let instance_id = entry.id;
+
+        let memory_override_enabled = entry.configuration.memory.is_some();
+        let (min_mem, max_mem) = if let Some(memory) = &entry.configuration.memory {
+            (memory.min, memory.max)
+        } else {
+            (512, 4096)
+        };
+
+        let memory_min_input_state = cx.new(|cx| {
+            InputState::new(window, cx).default_value(min_mem.to_string())
+        });
         cx.subscribe_in(&memory_min_input_state, window, Self::on_memory_step).detach();
-        let memory_max_input_state = cx.new(|cx| InputState::new(window, cx).default_value("4096"));
+        cx.subscribe(&memory_min_input_state, Self::on_memory_changed).detach();
+        let memory_max_input_state = cx.new(|cx| {
+            InputState::new(window, cx).default_value(max_mem.to_string())
+        });
         cx.subscribe_in(&memory_max_input_state, window, Self::on_memory_step).detach();
+        cx.subscribe(&memory_max_input_state, Self::on_memory_changed).detach();
 
         Self {
             instance: instance.clone(),
+            instance_id,
             new_name_input_state,
+            memory_override_enabled,
             memory_min_input_state,
             memory_max_input_state,
             new_name_change_state: NewNameChangeState::NoChange,
@@ -84,7 +105,6 @@ impl InstanceSettingsSubpage {
         }
     }
 
-
     pub fn on_memory_step(
         &mut self,
         state: &Entity<InputState>,
@@ -95,7 +115,7 @@ impl InstanceSettingsSubpage {
         match event {
             NumberInputEvent::Step(step_action) => match step_action {
                 gpui_component::input::StepAction::Decrement => {
-                    if let Ok(mut value) = state.read(cx).value().parse::<usize>() {
+                    if let Ok(mut value) = state.read(cx).value().parse::<u32>() {
                         value = value.saturating_div(256).saturating_sub(1).saturating_mul(256).max(128);
                         state.update(cx, |input, cx| {
                             input.set_value(value.to_string(), window, cx);
@@ -103,7 +123,7 @@ impl InstanceSettingsSubpage {
                     }
                 },
                 gpui_component::input::StepAction::Increment => {
-                    if let Ok(mut value) = state.read(cx).value().parse::<usize>() {
+                    if let Ok(mut value) = state.read(cx).value().parse::<u32>() {
                         value = value.saturating_div(256).saturating_add(1).saturating_mul(256).max(128);
                         state.update(cx, |input, cx| {
                             input.set_value(value.to_string(), window, cx);
@@ -112,6 +132,35 @@ impl InstanceSettingsSubpage {
                 },
             },
         }
+    }
+
+    pub fn on_memory_changed(
+        &mut self,
+        _: Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::Change = event {
+            if !self.memory_override_enabled {
+                return;
+            }
+
+            self.backend_handle.send(MessageToBackend::SetInstanceMemory {
+                id: self.instance_id,
+                memory: self.get_memory_configuration(cx)
+            });
+        }
+    }
+
+    fn get_memory_configuration(&self, cx: &App) -> Option<InstanceMemoryConfiguration> {
+        if !self.memory_override_enabled {
+            return None;
+        }
+
+        let min = self.memory_min_input_state.read(cx).value().parse::<u32>().ok()?;
+        let max = self.memory_max_input_state.read(cx).value().parse::<u32>().ok()?;
+
+        Some(InstanceMemoryConfiguration { min, max })
     }
 }
 
@@ -124,6 +173,8 @@ impl Render for InstanceSettingsSubpage {
             .mb_1()
             .ml_1()
             .child(div().text_lg().child("Settings"));
+
+        let memory_override_enabled = self.memory_override_enabled;
 
         let content = v_flex()
             .p_4()
@@ -156,10 +207,26 @@ impl Render for InstanceSettingsSubpage {
             )
             .child(v_flex()
                 .gap_1()
-                .child(Checkbox::new("memory").label("Memory").checked(false))
-                .child(NumberInput::new(&self.memory_min_input_state).w_64().small().suffix("MiB").disabled(true))
-                .child(NumberInput::new(&self.memory_max_input_state).w_64().small().suffix("MiB").disabled(true)))
-            .child(Button::new("delete").w_64().label("Delete this instance").danger().on_click({
+                .child(Checkbox::new("memory").label("Memory").checked(memory_override_enabled).on_click(cx.listener(|page, value, _, cx| {
+                    if page.memory_override_enabled != *value {
+                        page.memory_override_enabled = *value;
+                        page.backend_handle.send(MessageToBackend::SetInstanceMemory {
+                            id: page.instance_id,
+                            memory: page.get_memory_configuration(cx)
+                        });
+                        cx.notify();
+                    }
+                })))
+                .child(h_flex()
+                    .gap_1()
+                    .child(NumberInput::new(&self.memory_min_input_state).max_w_64().small().suffix("MiB").disabled(!memory_override_enabled))
+                    .child("Min"))
+                .child(h_flex()
+                    .gap_1()
+                    .child(NumberInput::new(&self.memory_max_input_state).max_w_64().small().suffix("MiB").disabled(!memory_override_enabled))
+                    .child("Max"))
+                )
+            .child(Button::new("delete").max_w_64().label("Delete this instance").danger().on_click({
                 let instance = self.instance.clone();
                 let backend_handle = self.backend_handle.clone();
                 move |_, window, cx| {

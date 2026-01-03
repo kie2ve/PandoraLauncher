@@ -2,7 +2,10 @@ use std::{path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-pub struct Persistent<T: Serialize + for <'de> Deserialize<'de> + Default> {
+use crate::IoOrSerializationError;
+
+#[derive(Debug)]
+pub struct Persistent<T: Serialize + for <'de> Deserialize<'de>> {
     path: Arc<Path>,
     dirty: bool,
     data: T
@@ -16,6 +19,17 @@ impl<T: Serialize + for <'de> Deserialize<'de> + Default> Persistent<T> {
             dirty: false,
             data,
         }
+    }
+}
+
+impl<T: Serialize + for <'de> Deserialize<'de>> Persistent<T> {
+    pub fn try_load(path: Arc<Path>) -> Result<Self, IoOrSerializationError> {
+        let data = crate::read_json(&path)?;
+        Ok(Self {
+            path,
+            dirty: false,
+            data,
+        })
     }
 
     pub fn modify(&mut self, func: impl FnOnce(&mut T)) {

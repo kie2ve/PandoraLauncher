@@ -190,6 +190,7 @@ impl Launcher {
             java_path,
             natives_dir,
             game_dir: dot_minecraft_path,
+            configuration: instance_info,
             assets_root: self.directories.assets_root_dir.clone(),
             temp_dir: self.directories.temp_dir.clone(),
             assets_index_name,
@@ -1354,6 +1355,7 @@ pub struct LaunchContext {
     pub java_path: PathBuf,
     pub natives_dir: PathBuf,
     pub game_dir: Arc<Path>,
+    pub configuration: InstanceConfiguration,
     pub assets_root: Arc<Path>,
     pub temp_dir: Arc<Path>,
     pub assets_index_name: String,
@@ -1410,6 +1412,11 @@ impl LaunchContext {
 
         if let Some(log_configuration) = &self.log_configuration {
             command.arg(log_configuration);
+        }
+
+        if let Some(memory) = &self.configuration.memory {
+            command.arg(format!("-Xms{}m", memory.min));
+            command.arg(format!("-Xmx{}m", memory.max));
         }
 
         command.arg("com.moulberry.pandora.LaunchWrapper");

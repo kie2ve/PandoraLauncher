@@ -1,7 +1,7 @@
 use std::{ffi::OsString, path::{Path, PathBuf}, sync::Arc};
 
 use enumset::{EnumSet, EnumSetType};
-use schema::{instance::InstanceConfiguration, loader::Loader};
+use schema::{instance::{InstanceConfiguration, InstanceMemoryConfiguration}, loader::Loader};
 use ustr::Ustr;
 use uuid::Uuid;
 
@@ -28,6 +28,10 @@ pub enum MessageToBackend {
     RenameInstance {
         id: InstanceID,
         name: Ustr,
+    },
+    SetInstanceMemory {
+        id: InstanceID,
+        memory: Option<InstanceMemoryConfiguration>,
     },
     KillInstance {
         id: InstanceID,
