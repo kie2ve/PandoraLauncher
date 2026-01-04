@@ -57,10 +57,13 @@ pub fn open_delete_instance(
             }
             2 => {
                 let correct = correct_name.load(Ordering::Relaxed);
-                v_flex()
-                    .gap_2()
+                // .div() and .child(div().h_2()) are workarounds for a weird layout bug
+                // where the Input would be set to its minimum width when confirm_message wrapped
+                div()
                     .child(confirm_message.clone())
+                    .child(div().h_2())
                     .child(Input::new(&input_state).border_color(gpui::red()))
+                    .child(div().h_2())
                     .child(Button::new("confirm").label("Delete this instance").danger().disabled(!correct).on_click({
                         let backend_handle = backend_handle.clone();
                         move |_, window, cx| {
