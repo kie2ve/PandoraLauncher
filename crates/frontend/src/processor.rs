@@ -128,14 +128,13 @@ impl Processor {
             MessageToFrontend::AddGameOutput {
                 id,
                 time,
-                thread,
                 level,
                 text,
             } => {
                 if let Some((window, game_output)) = self.game_output_windows.get(&id) {
                     _ = window.update(cx, |_, window, cx| {
                         game_output.update(cx, |game_output, _| {
-                            game_output.add(time, thread, level, text);
+                            game_output.add(time, level, text);
                         });
                         window.refresh();
                     });

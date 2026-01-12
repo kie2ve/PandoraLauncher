@@ -697,6 +697,9 @@ fn create_instance_mod_summary(path: &Path, mod_metadata_manager: &Arc<ModMetada
     let Some(filename) = path.file_name().and_then(|s| s.to_str()) else {
         return None;
     };
+    if filename.starts_with(".pandora.") {
+        return None;
+    }
     let enabled = if filename.ends_with(".jar.disabled") || filename.ends_with(".mrpack.disabled") {
         false
     } else if filename.ends_with(".jar") || filename.ends_with(".mrpack") {

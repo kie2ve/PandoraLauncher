@@ -151,7 +151,6 @@ pub enum MessageToFrontend {
     AddGameOutput {
         id: usize,
         time: i64,
-        thread: Arc<str>,
         level: GameOutputLogLevel,
         text: Arc<[Arc<str>]>,
     },

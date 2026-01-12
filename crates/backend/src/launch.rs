@@ -1,31 +1,26 @@
 use std::{
-    borrow::Cow,
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    ffi::{OsStr, OsString},
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Child, Stdio},
-    sync::{Arc, OnceLock, atomic::AtomicBool},
+    borrow::Cow, cmp::Ordering, collections::{HashMap, HashSet}, ffi::{OsStr, OsString}, io::Write, os::unix::ffi::OsStrExt, path::{Path, PathBuf}, process::{Child, Stdio}, sync::{atomic::AtomicBool, Arc, OnceLock}
 };
 
 use bridge::{
     handle::FrontendHandle, message::{MessageToFrontend, QuickPlayLaunch}, modal_action::{ModalAction, ProgressTracker, ProgressTrackerFinishType, ProgressTrackers}, safe_path::SafePath
 };
 use futures::{FutureExt, TryFutureExt};
+use rand::seq::SliceRandom;
 use rc_zip_sync::ReadZip;
 use regex::Regex;
+use rustc_hash::FxHashMap;
 use schema::{
-    assets_index::AssetsIndex, fabric_launch::FabricLaunch, instance::InstanceConfiguration, java_runtime_component::{JavaRuntimeComponentFile, JavaRuntimeComponentManifest}, loader::Loader, version::{
-        GameLibrary, GameLibraryArtifact, GameLibraryDownloads, GameLibraryExtractOptions, GameLogging, LaunchArgument,
-        LaunchArgumentValue, MinecraftVersion, OsArch, OsName, Rule, RuleAction,
-    }
+    assets_index::AssetsIndex, fabric_launch::FabricLaunch, forge::{ForgeInstallProfile, ForgeSide}, instance::InstanceConfiguration, java_runtime_component::{JavaRuntimeComponentFile, JavaRuntimeComponentManifest}, loader::Loader, maven::MavenMetadataXml, version::{
+        GameLibrary, GameLibraryArtifact, GameLibraryDownloads, GameLibraryExtractOptions, GameLogging, LaunchArgument, LaunchArgumentValue, MinecraftVersion, OsArch, OsName, PartialMinecraftVersion, Rule, RuleAction
+    }, version_manifest::MinecraftVersionManifest
 };
+use serde::Deserialize;
 use sha1::{Digest, Sha1};
 use ustr::Ustr;
 
 use crate::{
-    account::MinecraftLoginInfo, directories::LauncherDirectories, launch_wrapper, metadata::{items::{AssetsIndexMetadataItem, FabricLaunchMetadataItem, FabricLoaderManifestMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem}, manager::{
+    account::MinecraftLoginInfo, directories::LauncherDirectories, launch_wrapper, metadata::{items::{AssetsIndexMetadataItem, FabricLaunchMetadataItem, FabricLoaderManifestMetadataItem, ForgeInstallerMavenMetadataItem, MinecraftVersionManifestMetadataItem, MinecraftVersionMetadataItem, MojangJavaRuntimeComponentMetadataItem, MojangJavaRuntimesMetadataItem, NeoforgeInstallerMavenMetadataItem}, manager::{
         MetaLoadError, MetadataManager,
     }}
 };
@@ -39,6 +34,8 @@ pub struct Launcher {
 
 #[derive(thiserror::Error, Debug)]
 pub enum LaunchError {
+    #[error("Failed to deserialize data:\n{0}")]
+    SerdeJsonError(#[from] serde_json::Error),
     #[error("Failed to perform I/O operation:\n{0}")]
     IoError(#[from] std::io::Error),
     #[error("Failed to load java runtime:\n{0}")]
@@ -49,12 +46,24 @@ pub enum LaunchError {
     LoadLibrariesError(#[from] LoadLibrariesError),
     #[error("Failed to load metadata:\n{0}")]
     MetaLoadError(#[from] MetaLoadError),
-    #[error("Failed to find version:\n{0}")]
+    #[error("Failed read zip:\n{0}")]
+    ZipError(#[from] rc_zip_sync::rc_zip::Error),
+    #[error("Missing file in zip: {0}")]
+    MissingFileInZipError(Cow<'static, str>),
+    #[error("Failed to find version: {0}")]
     CantFindVersion(&'static str),
-    #[error("Invalid instance name:\n{0}")]
+    #[error("Invalid instance name: {0}")]
     InvalidInstanceName(&'static str),
+    #[error("Error running forge post processor")]
+    ForgePostProcessorError,
     #[error("Cancelled by user")]
     CancelledByUser,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum AddVanillaJar {
+    Yes,
+    No,
 }
 
 impl Launcher {
@@ -79,8 +88,8 @@ impl Launcher {
     ) -> Result<Child, LaunchError> {
         launch_tracker.set_total(6);
 
-        let version_info = tokio::select! {
-            result = self.create_launch_version(launch_tracker, &instance_info) => result?,
+        let (version_info, add_vanilla_jar) = tokio::select! {
+            result = self.create_launch_version(http_client, &modal_action.trackers, launch_tracker, &instance_info) => result?,
             _ = modal_action.request_cancel.cancelled() => {
                 self.sender.send(MessageToFrontend::CloseModal);
                 return Err(LaunchError::CancelledByUser);
@@ -106,13 +115,15 @@ impl Launcher {
         let natives_dir = self.directories.temp_natives_base_dir.join(calculate_natives_dirname(&artifacts));
         let _ = std::fs::create_dir_all(&natives_dir);
 
-        let client_download = &version_info.downloads.client;
-        artifacts.push(GameLibraryArtifact {
-            path: format!("net/minecraft/{}/minecraft-client-{}.jar", instance_info.minecraft_version, instance_info.minecraft_version).into(),
-            sha1: Some(client_download.sha1),
-            size: Some(client_download.size),
-            url: client_download.url,
-        });
+        if add_vanilla_jar == AddVanillaJar::Yes {
+            let client_download = &version_info.downloads.client;
+            artifacts.push(GameLibraryArtifact {
+                path: format!("net/minecraft/{0}/minecraft-client-{0}.jar", instance_info.minecraft_version).into(),
+                sha1: Some(client_download.sha1),
+                size: Some(client_download.size),
+                url: client_download.url,
+            });
+        }
 
         let mojang_java_binary_future = self.load_mojang_java_binary(
             &self.meta,
@@ -194,6 +205,7 @@ impl Launcher {
         let launch_context = LaunchContext {
             java_path,
             natives_dir,
+            libraries_dir: self.directories.libraries_dir.clone(),
             game_dir: dot_minecraft_path,
             configuration: instance_info,
             assets_root: self.directories.assets_root_dir.clone(),
@@ -220,9 +232,11 @@ impl Launcher {
 
     async fn create_launch_version(
         &self,
+        http_client: &reqwest::Client,
+        progress_trackers: &ProgressTrackers,
         launch_tracker: &ProgressTracker,
         instance_info: &InstanceConfiguration,
-    ) -> Result<Arc<MinecraftVersion>, LaunchError> {
+    ) -> Result<(Arc<MinecraftVersion>, AddVanillaJar), LaunchError> {
         match instance_info.loader {
             Loader::Vanilla => {
                 launch_tracker.add_total(1);
@@ -237,7 +251,7 @@ impl Launcher {
                     return Err(LaunchError::CantFindVersion(instance_info.minecraft_version.as_str()));
                 };
 
-                Ok(self.meta.fetch(&MinecraftVersionMetadataItem(version)).await?)
+                Ok((self.meta.fetch(&MinecraftVersionMetadataItem(version)).await?, AddVanillaJar::Yes))
             },
             Loader::Fabric => {
                 let versions = self.meta.fetch(&MinecraftVersionManifestMetadataItem).map_err(LaunchError::from);
@@ -357,12 +371,397 @@ impl Launcher {
 
                 version.main_class = fabric_launch.launcher_meta.main_class.client;
 
-                Ok(Arc::new(version))
+                Ok((Arc::new(version), AddVanillaJar::Yes))
             },
-            Loader::Forge => todo!(),
-            Loader::NeoForge => todo!(),
+            Loader::Forge => {
+                launch_tracker.add_total(7);
+                launch_tracker.notify();
+
+                // Download Minecraft manifest and neoforge installer maven
+                let (minecraft_versions, loader_versions) = futures::future::try_join(
+                    self.meta.fetch(&MinecraftVersionManifestMetadataItem),
+                    self.meta.fetch(&ForgeInstallerMavenMetadataItem)
+                ).await?;
+
+                self.create_forgelike_launch_version(http_client, progress_trackers, launch_tracker, instance_info,
+                    minecraft_versions,
+                    loader_versions,
+                    "https://maven.minecraftforge.net/net/minecraftforge/forge/{0}/forge-{0}-installer.jar.sha1",
+                    "net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
+                    "https://maven.minecraftforge.net/net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
+                    true,
+                    false
+                ).await
+            },
+            Loader::NeoForge => {
+                launch_tracker.add_total(7);
+                launch_tracker.notify();
+
+                // Download Minecraft manifest and neoforge installer maven
+                let (minecraft_versions, loader_versions) = futures::future::try_join(
+                    self.meta.fetch(&MinecraftVersionManifestMetadataItem),
+                    self.meta.fetch(&NeoforgeInstallerMavenMetadataItem)
+                ).await?;
+
+                self.create_forgelike_launch_version(http_client, progress_trackers, launch_tracker, instance_info,
+                    minecraft_versions,
+                    loader_versions,
+                    "https://maven.neoforged.net/releases/net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar.sha1",
+                    "net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
+                    "https://maven.neoforged.net/releases/net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
+                    false,
+                    true
+                ).await
+            },
             Loader::Unknown => todo!(),
         }
+    }
+
+    async fn create_forgelike_launch_version(
+        &self,
+        http_client: &reqwest::Client,
+        progress_trackers: &ProgressTrackers,
+        launch_tracker: &ProgressTracker,
+        instance_info: &InstanceConfiguration,
+        minecraft_versions: Arc<MinecraftVersionManifest>,
+        loader_versions: Arc<MavenMetadataXml>,
+        installer_hash_url: &'static str,
+        installer_path: &'static str,
+        installer_url: &'static str,
+        check_mirrors: bool,
+        neoforge_versioning: bool,
+    ) -> Result<(Arc<MinecraftVersion>, AddVanillaJar), LaunchError> {
+        launch_tracker.add_count(1);
+        launch_tracker.notify();
+
+        let Some(version_link) = minecraft_versions.versions.iter().find(|v| v.id == instance_info.minecraft_version) else {
+            return Err(LaunchError::CantFindVersion(instance_info.minecraft_version.as_str()));
+        };
+
+        let mut minecraft_version_parts = VersionFragment::string_to_parts(instance_info.minecraft_version.as_str());
+        if neoforge_versioning {
+            // 1.21.5 -> 21.5
+            // 25w14craftmine -> 0.25w14craftmine
+            // 1.21 -> 21.0
+            // 26.1 -> 26.1.0
+            if minecraft_version_parts[0] == VersionFragment::String("25w14craftmine".into()) {
+                minecraft_version_parts.insert(0, VersionFragment::Number(0))
+            } else {
+                if minecraft_version_parts.len() < 3 {
+                    minecraft_version_parts.push(VersionFragment::Number(0))
+                }
+                if minecraft_version_parts[0] == VersionFragment::Number(1) {
+                    minecraft_version_parts.remove(0);
+                }
+            }
+        }
+
+        let mut latest_loader_version = None;
+        let mut latest_loader_version_parts = Vec::new();
+        for version in loader_versions.versioning.versions.version.iter().rev() {
+            let parts = VersionFragment::string_to_parts(version);
+
+            if parts.starts_with(&minecraft_version_parts) {
+                if parts > latest_loader_version_parts {
+                    latest_loader_version_parts = parts;
+                    latest_loader_version = Some(version.clone());
+                }
+            }
+        }
+        let Some(latest_loader_version) = latest_loader_version else {
+            return Err(LaunchError::CantFindVersion(instance_info.minecraft_version.as_str()));
+        };
+
+        // Download base Minecraft version and neoforge installer hash
+        let installer_hash_url = installer_hash_url.replace("{0}", &latest_loader_version);
+        let (base_version, installer_sha1) = futures::future::join(
+            self.meta.fetch(&MinecraftVersionMetadataItem(version_link)),
+            Self::download_sha1(http_client, &installer_hash_url)
+        ).await;
+        let base_version = base_version?;
+
+        launch_tracker.add_count(1);
+        launch_tracker.notify();
+
+        // Download installer jar as an artifact
+        let artifacts = &[
+            GameLibraryArtifact {
+                path: installer_path.replace("{0}", &latest_loader_version).into(),
+                sha1: installer_sha1,
+                size: None,
+                url: installer_url.replace("{0}", &latest_loader_version).into(),
+            },
+            GameLibraryArtifact {
+                path: format!("net/minecraft/{0}/minecraft-client-{0}.jar", instance_info.minecraft_version).into(),
+                sha1: Some(base_version.downloads.client.sha1),
+                size: Some(base_version.downloads.client.size),
+                url: base_version.downloads.client.url,
+            },
+        ];
+
+        let mojang_java_binary_future = self.load_mojang_java_binary(
+            &self.meta,
+            http_client,
+            &base_version,
+            progress_trackers,
+            launch_tracker,
+        );
+        let load_installer_library_future = self.load_libraries(http_client, artifacts, progress_trackers, launch_tracker);
+
+        let (artifact_load_result, java_load_result) = futures::future::try_join(
+            load_installer_library_future.map_err(LaunchError::from),
+            mojang_java_binary_future.map_err(LaunchError::from),
+        ).await?;
+        let installer_path = &artifact_load_result[0].1;
+        let minecraft_jar_path = &artifact_load_result[1].1;
+
+        let installer_file = std::fs::File::open(installer_path)?;
+
+        let installer_zip = installer_file.read_zip()?;
+
+        // Read install profile
+        let Some(install_profile_file) = installer_zip.by_name("install_profile.json") else {
+            return Err(LaunchError::MissingFileInZipError(Cow::Borrowed("install_profile.json")));
+        };
+
+        let install_profile: ForgeInstallProfile = serde_json::from_slice(&install_profile_file.bytes()?)?;
+
+        // Read partial minecraft version
+        let mut version_file_name = &*install_profile.json;
+        if version_file_name.starts_with('/') {
+            version_file_name = &version_file_name[1..];
+        }
+        let Some(version_file) = installer_zip.by_name(&version_file_name) else {
+            return Err(LaunchError::MissingFileInZipError(Cow::Owned(version_file_name.to_string())));
+        };
+        let version: PartialMinecraftVersion = serde_json::from_slice(&version_file.bytes()?)?;
+
+        // Download mirror list
+        let mirror = if check_mirrors {
+            Self::download_random_mirror(http_client, &install_profile.mirror_list).await
+        } else {
+            None
+        };
+
+        launch_tracker.add_count(1);
+        launch_tracker.notify();
+
+        let libraries = install_profile.libraries.iter().filter_map(|library| {
+            let mut artifact = library.downloads.artifact.clone()?;
+            if let Some(mirror) = &mirror {
+                if artifact.url.starts_with("http") && !artifact.url.starts_with("https://libraries.minecraft.net/") && artifact.url.ends_with(artifact.path.as_str()) {
+                    artifact.url = format!("{}{}", mirror, artifact.path).into();
+                }
+            }
+            Some(artifact)
+        }).collect::<Vec<_>>();
+
+        self.load_libraries(http_client, &libraries, progress_trackers, launch_tracker).await?;
+
+        let forge_temp = self.directories.temp_dir.join("forge_installer");
+
+        let mut data = FxHashMap::default();
+
+        for (key, sided_data) in install_profile.data {
+            let value = sided_data.client;
+            if value.is_empty() {
+                continue;
+            }
+
+            if value.starts_with('[') && value.ends_with(']') {
+                let artifact = MavenCoordinate::create(&value[1..value.len()-1]);
+                let artifact_path = artifact.artifact_path();
+                if let Some(target) = SafePath::new(&artifact_path) {
+                    let target = target.to_path(&self.directories.libraries_dir);
+                    data.insert(key, target.into_os_string());
+                } else {
+                    eprintln!("Artifact generated invalid path: {}", artifact_path);
+                }
+            } else if value.starts_with('\'') && value.ends_with('\'') {
+                data.insert(key, OsString::from(&value[1..value.len()-1]));
+            } else {
+                let mut file_name = &*value;
+                if file_name.starts_with('/') {
+                    file_name = &file_name[1..];
+                }
+                let Some(file) = installer_zip.by_name(&file_name) else {
+                    return Err(LaunchError::MissingFileInZipError(Cow::Owned(file_name.to_string())));
+                };
+                if let Some(target) = SafePath::new(file_name) {
+                    let target = target.to_path(&forge_temp);
+                    crate::write_safe(&target, &file.bytes()?)?;
+                    data.insert(key, target.into_os_string());
+                } else {
+                    eprintln!("Unable to extract {}", file_name);
+                }
+            }
+        }
+
+        drop(installer_zip);
+        drop(installer_file);
+
+        data.insert("SIDE".into(), "client".into());
+        data.insert("MINECRAFT_JAR".into(), minecraft_jar_path.as_os_str().to_os_string());
+        data.insert("MINECRAFT_VERSION".into(), OsString::from(&*install_profile.minecraft));
+        // ROOT is omitted
+        data.insert("INSTALLER".into(), installer_path.as_os_str().to_os_string());
+        data.insert("LIBRARY_DIR".into(), self.directories.libraries_dir.as_os_str().to_os_string());
+
+        let processor_tracker = ProgressTracker::new("Forge Post Processors".into(), self.sender.clone());
+        progress_trackers.push(processor_tracker.clone());
+
+        processor_tracker.set_total(install_profile.processors.len());
+        processor_tracker.notify();
+
+        for processor in install_profile.processors.iter() {
+            if let Some(sides) = &processor.sides {
+                if !sides.iter().any(|side| *side == ForgeSide::Client) {
+                    processor_tracker.add_count(1);
+                    processor_tracker.notify();
+
+                    continue;
+                }
+            }
+
+            let jar = MavenCoordinate::create(&processor.jar);
+
+            // Check if the output already exists and the step can be skipped
+            let skip = self.can_skip_forge_processor(&jar, processor, &data);
+            if skip {
+                processor_tracker.add_count(1);
+                processor_tracker.notify();
+                continue;
+            }
+
+            let relative_jar_path = jar.artifact_path();
+
+            let Some(safe_jar_path) = SafePath::new(&relative_jar_path) else {
+                eprintln!("Unable to run processor, invalid path: {}", relative_jar_path);
+                processor_tracker.add_count(1);
+                processor_tracker.notify();
+                continue;
+            };
+
+            let jar_path = safe_jar_path.to_path(&self.directories.libraries_dir);
+            let jar_file = std::fs::File::open(&jar_path)?;
+            let jar_zip = jar_file.read_zip()?;
+
+            let Some(manifest_file) = jar_zip.by_name("META-INF/MANIFEST.MF") else {
+                return Err(LaunchError::MissingFileInZipError(Cow::Borrowed("META-INF/MANIFEST.MF")));
+            };
+
+            let manifest_bytes = manifest_file.bytes()?;
+
+            drop(jar_zip);
+            drop(jar_file);
+
+            let Ok(manifest_str) = str::from_utf8(&manifest_bytes) else {
+                eprintln!("Unable to run processor, MANIFEST.MF is not utf8 encoded");
+                processor_tracker.add_count(1);
+                processor_tracker.notify();
+                continue;
+            };
+
+            let mut main_class = None;
+            for line in manifest_str.split("\n") {
+                let line = line.trim_ascii();
+                if line.starts_with("Main-Class:") {
+                    main_class = Some(line["Main-Class:".len()..].trim_ascii());
+                    break;
+                }
+            }
+
+            let Some(main_class) = main_class else {
+                eprintln!("Unable to run processor, can't find Main-Class in MANIFEST.MF");
+                processor_tracker.add_count(1);
+                processor_tracker.notify();
+                continue;
+            };
+
+            let mut command = std::process::Command::new(&*java_load_result);
+
+            command.current_dir(&forge_temp);
+            command.stdin(Stdio::inherit());
+            command.stdout(Stdio::inherit());
+            command.stderr(Stdio::inherit());
+
+            command.arg("-cp");
+            command.arg(std::env::join_paths(processor.classpath.iter().map(|f| {
+                let artifact = MavenCoordinate::create(&**f);
+                self.directories.libraries_dir.join(artifact.artifact_path()).into_os_string()
+            }).chain(std::iter::once(jar_path.into_os_string()))).unwrap());
+
+            command.arg(main_class);
+
+            for arg in processor.args.iter() {
+                let expanded = if arg.starts_with('[') && arg.ends_with(']') {
+                    let artifact = MavenCoordinate::create(&arg[1..arg.len()-1]);
+                    let artifact_path = artifact.artifact_path();
+                    if let Some(target) = SafePath::new(&artifact_path) {
+                        let target = target.to_path(&self.directories.libraries_dir);
+                        Cow::Owned(target.into_os_string())
+                    } else {
+                        eprintln!("Artifact generated invalid path: {}", artifact_path);
+                        continue;
+                    }
+                } else if &**arg == "{ROOT}/libraries/" {
+                    Cow::Borrowed(self.directories.libraries_dir.as_os_str())
+                } else {
+                    expand_forge_argument(&arg, &data)
+                };
+                command.arg(expanded);
+            }
+
+            let mut child = command.spawn()?;
+            let exit_code = child.wait()?;
+
+            if !exit_code.success() {
+                return Err(LaunchError::ForgePostProcessorError);
+            }
+
+            processor_tracker.add_count(1);
+            processor_tracker.notify();
+        }
+
+        processor_tracker.set_finished(ProgressTrackerFinishType::Normal);
+
+        launch_tracker.add_count(1);
+        launch_tracker.notify();
+
+        Ok((Arc::new(version.apply_to(&base_version)), AddVanillaJar::No))
+    }
+
+    async fn download_sha1(http_client: &reqwest::Client, url: &str) -> Option<Ustr> {
+        let response = http_client
+            .get(url)
+            .send().await.ok()?;
+
+        let bytes = response.bytes().await.ok()?;
+
+        if bytes.len() != 40 {
+            return None;
+        }
+
+        Some(str::from_utf8(&bytes).ok()?.into())
+    }
+
+    async fn download_random_mirror(http_client: &reqwest::Client, url: &str) -> Option<Arc<str>> {
+        let response = http_client
+            .get(url)
+            .send().await.ok()?;
+
+        let bytes = response.bytes().await.ok()?;
+
+        #[derive(Deserialize)]
+        struct Mirror {
+            url: Arc<str>,
+        }
+
+        let mirrors: Vec<Mirror> = serde_json::from_slice(&bytes).ok()?;
+
+        let mirror = mirrors.choose(&mut rand::thread_rng())?;
+
+        Some(mirror.url.clone())
     }
 
     async fn load_mojang_java_binary(
@@ -514,74 +913,216 @@ impl Launcher {
         http_client: &reqwest::Client,
         logging: Option<&GameLogging>,
     ) -> Option<OsString> {
-        if let Some(logging) = logging {
-            let id = logging.client.file.id.as_str();
-            if !path_is_normal(id) {
-                eprintln!("Log configuration has path: {}", id);
-                return None;
-            }
-            let path = self.directories.log_configs_dir.join(id);
-
-            let _ = std::fs::create_dir(&self.directories.log_configs_dir);
-
-            let mut expected_hash = [0u8; 20];
-            let Ok(_) = hex::decode_to_slice(logging.client.file.sha1.as_str(), &mut expected_hash) else {
-                eprintln!("Log configuration has invalid sha1: {}", logging.client.file.sha1.as_str());
-                return None;
-            };
-
-            let valid_hash_on_disk = {
-                let path = path.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::check_sha1_hash(&path, expected_hash).unwrap_or(false)
-                }).await.unwrap()
-            };
-
-            if valid_hash_on_disk {
-                return Some(expand_logging_argument(logging.client.argument.as_str(), &path));
-            }
-
-            let Ok(response) = http_client.get(logging.client.file.url.as_str()).send().await else {
-                eprintln!("Failed to make request to download log configuration");
-                return None;
-            };
-            let Ok(bytes) = response.bytes().await else {
-                eprintln!("Failed to download log configuration");
-                return None;
-            };
-            let bytes = Arc::new(bytes);
-
-            if bytes.len() != logging.client.file.size as usize {
-                eprintln!("Rejecting log configuration because invalid size");
-                return None;
-            }
-
-            let correct_hash = {
-                let bytes = Arc::clone(&bytes);
-
-                tokio::task::spawn_blocking(move || {
-                    let mut hasher = Sha1::new();
-                    hasher.update(&*bytes);
-                    let actual_hash = hasher.finalize();
-
-                    expected_hash == *actual_hash
-                }).await.unwrap()
-            };
-
-            if !correct_hash {
-                eprintln!("Log configuration has incorrect hash");
-                return None;
-            }
-
-            let Ok(_) = tokio::fs::write(path.clone(), &*bytes).await else {
-                eprintln!("Failed to write log configuration to disk");
-                return None;
-            };
-
-            Some(expand_logging_argument(logging.client.argument.as_str(), &path))
-        } else {
-            None
+        let Some(logging) = logging else {
+            return None;
+        };
+        let Some(client) = &logging.client else {
+            return None;
+        };
+        let id = client.file.id.as_str();
+        if !path_is_normal(id) {
+            eprintln!("Log configuration has path: {}", id);
+            return None;
         }
+        let path = self.directories.log_configs_dir.join(id);
+
+        let _ = std::fs::create_dir(&self.directories.log_configs_dir);
+
+        let mut expected_hash = [0u8; 20];
+        let Ok(_) = hex::decode_to_slice(client.file.sha1.as_str(), &mut expected_hash) else {
+            eprintln!("Log configuration has invalid sha1: {}", client.file.sha1.as_str());
+            return None;
+        };
+
+        let valid_hash_on_disk = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::check_sha1_hash(&path, expected_hash).unwrap_or(false)
+            }).await.unwrap()
+        };
+
+        if valid_hash_on_disk {
+            return Some(expand_logging_argument(client.argument.as_str(), &path));
+        }
+
+        let Ok(response) = http_client.get(client.file.url.as_str()).send().await else {
+            eprintln!("Failed to make request to download log configuration");
+            return None;
+        };
+        let Ok(bytes) = response.bytes().await else {
+            eprintln!("Failed to download log configuration");
+            return None;
+        };
+        let bytes = Arc::new(bytes);
+
+        if bytes.len() != client.file.size as usize {
+            eprintln!("Rejecting log configuration because invalid size");
+            return None;
+        }
+
+        let correct_hash = {
+            let bytes = Arc::clone(&bytes);
+
+            tokio::task::spawn_blocking(move || {
+                let mut hasher = Sha1::new();
+                hasher.update(&*bytes);
+                let actual_hash = hasher.finalize();
+
+                expected_hash == *actual_hash
+            }).await.unwrap()
+        };
+
+        if !correct_hash {
+            eprintln!("Log configuration has incorrect hash");
+            return None;
+        }
+
+        let Ok(_) = tokio::fs::write(path.clone(), &*bytes).await else {
+            eprintln!("Failed to write log configuration to disk");
+            return None;
+        };
+
+        Some(expand_logging_argument(client.argument.as_str(), &path))
+    }
+
+    fn can_skip_forge_processor(&self, jar: &MavenCoordinate<'_>, processor: &schema::forge::ForgeInstallProcessor, data: &FxHashMap<String, OsString>) -> bool {
+        if let Some(outputs) = &processor.outputs {
+            if outputs.is_empty() {
+                return false;
+            }
+            for (key, value) in outputs {
+                let key = expand_forge_argument(key, data);
+                let value = expand_forge_argument(value, data);
+
+                let mut expected_hash = [0u8; 20];
+                let Ok(_) = hex::decode_to_slice(value.as_bytes(), &mut expected_hash) else {
+                    return false;
+                };
+
+                if !crate::check_sha1_hash(Path::new(&key), expected_hash).unwrap_or(false) {
+                    return false;
+                }
+            }
+            true
+        } else {
+            let mut argmap = FxHashMap::default();
+
+            let mut last_key = None;
+            for arg in processor.args.iter() {
+                if arg.starts_with("--") {
+                    last_key = Some(arg.as_str());
+                } else if let Some(key) = last_key.take() {
+                    argmap.insert(key, arg.as_str());
+                }
+            }
+
+            match jar.artifact_id {
+                "installertools" => {
+                    match argmap.get("--task") {
+                        Some(&"PROCESS_MINECRAFT_JAR") => {
+                            if argmap.get("--output") == Some(&"{PATCHED}") {
+                                if let Some(path) = data.get("PATCHED") {
+                                    return Path::new(path).exists();
+                                }
+                            }
+                        },
+                        Some(&"MCP_DATA") => {
+                            if argmap.get("--output") == Some(&"{MAPPINGS}") {
+                                if let Some(path) = data.get("MAPPINGS") {
+                                    return Path::new(path).exists();
+                                }
+                            }
+                        },
+                        Some(&"DOWNLOAD_MOJMAPS") => {
+                            if argmap.get("--output") == Some(&"{MOJMAPS}") {
+                                if let Some(path) = data.get("MOJMAPS") {
+                                    return Path::new(path).exists();
+                                }
+                            }
+                        },
+                        Some(&"MERGE_MAPPING") => {
+                            if argmap.get("--output") == Some(&"{MERGED_MAPPINGS}") {
+                                if let Some(path) = data.get("MERGED_MAPPINGS") {
+                                    return Path::new(path).exists();
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                },
+                "jarsplitter" => {
+                    if argmap.get("--input") != Some(&"{MINECRAFT_JAR}") {
+                        return false;
+                    }
+                    if argmap.get("--slim") != Some(&"{MC_SLIM}") {
+                        return false;
+                    }
+                    if argmap.get("--extra") != Some(&"{MC_EXTRA}") {
+                        return false;
+                    }
+                    let Some(slim_path) = data.get("MC_SLIM") else {
+                        return false;
+                    };
+                    let Some(extra_path) = data.get("MC_EXTRA") else {
+                        return false;
+                    };
+                    return Path::new(slim_path).exists() && Path::new(extra_path).exists();
+                },
+                "AutoRenamingTool" => {
+                    if argmap.get("--input") != Some(&"{MC_SLIM}") {
+                        return false;
+                    }
+                    if argmap.get("--output") != Some(&"{MC_SRG}") {
+                        return false;
+                    }
+                    if let Some(path) = data.get("MC_SRG") {
+                        return Path::new(path).exists();
+                    }
+                },
+                "binarypatcher" => {
+                    if argmap.get("--clean") != Some(&"{MC_SRG}") {
+                        return false;
+                    }
+                    if argmap.get("--output") != Some(&"{PATCHED}") {
+                        return false;
+                    }
+                    if let Some(path) = data.get("PATCHED") {
+                        return Path::new(path).exists();
+                    }
+                },
+                _ => {}
+            }
+            false
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum VersionFragment {
+    Alpha,
+    Beta,
+    Snapshot,
+    String(String),
+    Number(usize),
+}
+
+impl VersionFragment {
+    pub fn string_to_parts(version: &str) -> Vec<Self> {
+        version.split(&['.', '-', '+'])
+            .map(|v| {
+                if let Ok(number) = v.parse::<usize>() {
+                    VersionFragment::Number(number)
+                } else if v.eq_ignore_ascii_case("alpha") {
+                    VersionFragment::Alpha
+                } else if v.eq_ignore_ascii_case("beta") {
+                    VersionFragment::Beta
+                } else if v.eq_ignore_ascii_case("snapshot") {
+                    VersionFragment::Snapshot
+                } else {
+                    VersionFragment::String(v.into())
+                }
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -590,17 +1131,24 @@ struct MavenCoordinate<'a> {
     artifact_id: &'a str,
     version: &'a str,
     specifier: Option<&'a str>,
+    extension: Option<&'a str>,
 }
 
 impl<'a> MavenCoordinate<'a> {
     fn create(maven: &'a str) -> Self {
-        let mut split = maven.split(":");
+        let (main, extension) = if let Some((main, extension)) = maven.split_once('@') {
+            (main, Some(extension))
+        } else {
+            (maven, None)
+        };
+
+        let mut split = main.split(":");
         let group_id = split.next().unwrap();
         let artifact_id = split.next().unwrap();
         let version = split.next().unwrap();
         let specifier = split.next();
 
-        Self { group_id, artifact_id, version, specifier }
+        Self { group_id, artifact_id, version, specifier, extension }
     }
 
     fn version_id(&self) -> Vec<isize> {
@@ -630,7 +1178,16 @@ impl<'a> MavenCoordinate<'a> {
         name.push_str(self.artifact_id);
         name.push('-');
         name.push_str(self.version);
-        name.push_str(".jar");
+        if let Some(specifier) = self.specifier {
+            name.push('-');
+            name.push_str(specifier);
+        }
+        name.push('.');
+        if let Some(extension) = self.extension {
+            name.push_str(extension);
+        } else {
+            name.push_str("jar");
+        }
         name
     }
 }
@@ -700,8 +1257,8 @@ pub enum LoadJavaRuntimeError {
     UnknownComponentForPlatform,
     #[error("Mojang runtime path is invalid")]
     InvalidComponentPath,
-    #[error("Downloaded file had wrong response size")]
-    WrongResponseSize,
+    #[error("Downloaded file had wrong response size. Expected {0}, got {1}")]
+    WrongResponseSize(usize, usize),
     #[error("Downloaded file had wrong raw size")]
     WrongRawSize,
     #[error("Failed to decompress file")]
@@ -787,7 +1344,7 @@ async fn do_java_runtime_load(
                     drop(permit);
 
                     if bytes.len() != size {
-                        return Err(LoadJavaRuntimeError::WrongResponseSize);
+                        return Err(LoadJavaRuntimeError::WrongResponseSize(size, bytes.len()));
                     }
 
                     let decompressed_or_raw = if lzma {
@@ -910,8 +1467,8 @@ pub enum LoadAssetObjectsError {
     IoError(#[from] std::io::Error),
     #[error("Hash isn't a valid sha1 hash\n{0}")]
     InvalidHash(Ustr),
-    #[error("Downloaded file had wrong response size")]
-    WrongResponseSize,
+    #[error("Downloaded file had wrong response size. Expected {0}, got {1}")]
+    WrongResponseSize(usize, usize),
     #[error("Downloaded file had the wrong hash")]
     WrongHash,
     #[error("Failed to load metadata:\n{0}")]
@@ -981,7 +1538,7 @@ async fn do_asset_objects_load(
             drop(permit);
 
             if bytes.len() != asset.size as usize {
-                return Err(LoadAssetObjectsError::WrongResponseSize);
+                return Err(LoadAssetObjectsError::WrongResponseSize(asset.size as usize, bytes.len()));
             }
 
             let correct_hash = {
@@ -1024,8 +1581,8 @@ pub enum LoadLibrariesError {
     IoError(#[from] std::io::Error),
     #[error("Hash isn't a valid sha1 hash\n{0}")]
     InvalidHash(Ustr),
-    #[error("Downloaded file had wrong response size")]
-    WrongResponseSize,
+    #[error("Downloaded file had wrong response size. Expected {0}, got {1}")]
+    WrongResponseSize(usize, usize),
     #[error("Downloaded file had the wrong hash")]
     WrongHash,
     #[error("Illegal library path {0}, directory traversal?")]
@@ -1107,7 +1664,7 @@ async fn do_libraries_load(
             drop(permit);
 
             if let Some(artifact_size) = artifact.size && bytes.len() != artifact_size as usize {
-                return Err(LoadLibrariesError::WrongResponseSize);
+                return Err(LoadLibrariesError::WrongResponseSize(artifact_size as usize, bytes.len()));
             }
 
             let correct_hash = {
@@ -1146,6 +1703,8 @@ async fn do_libraries_load(
 
 pub enum ArgumentExpansionKey {
     NativesDirectory,
+    LibrariesDirectory,
+    ClasspathSeparator,
     LauncherName,
     LauncherVersion,
     Classpath,
@@ -1173,6 +1732,8 @@ impl ArgumentExpansionKey {
     pub fn from_str(string: &str) -> Option<Self> {
         match string {
             "natives_directory" => Some(Self::NativesDirectory),
+            "library_directory" => Some(Self::LibrariesDirectory),
+            "classpath_separator" => Some(Self::ClasspathSeparator),
             "launcher_name" => Some(Self::LauncherName),
             "launcher_version" => Some(Self::LauncherVersion),
             "classpath" => Some(Self::Classpath),
@@ -1359,6 +1920,7 @@ impl LaunchRuleContext {
 pub struct LaunchContext {
     pub java_path: PathBuf,
     pub natives_dir: PathBuf,
+    pub libraries_dir: Arc<Path>,
     pub game_dir: Arc<Path>,
     pub configuration: InstanceConfiguration,
     pub assets_root: Arc<Path>,
@@ -1381,25 +1943,6 @@ impl LaunchContext {
         command.stderr(Stdio::piped());
 
         self.classpath.push(launch_wrapper::create_wrapper(&self.temp_dir).into_os_string());
-
-        if !self.add_mods.is_empty() {
-            // todo: forge?
-
-            let add_mods_path = self.temp_dir.join("pandora_add_mods_to_fabric.txt");
-
-            let mut add_mods_content = OsString::new();
-            for mod_to_add in &self.add_mods {
-                add_mods_content.push(mod_to_add);
-                add_mods_content.push("\n");
-            }
-
-            crate::write_safe(&add_mods_path, add_mods_content.as_encoded_bytes())?;
-
-            let mut add_mods_argument = OsString::new();
-            add_mods_argument.push("-Dfabric.addMods=@");
-            add_mods_argument.push(add_mods_path);
-            command.arg(add_mods_argument);
-        }
 
         if let Some(arguments) = &version_info.arguments {
             self.process_arguments(&arguments.jvm, &mut |arg| {
@@ -1451,6 +1994,26 @@ impl LaunchContext {
                 stdin_arguments.push_str("arg\n");
                 stdin_arguments.push_str(self.expand_argument(argument).to_string_lossy().as_ref());
                 stdin_arguments.push('\n');
+            }
+        }
+
+
+        if !self.add_mods.is_empty() {
+            match self.configuration.loader {
+                Loader::Vanilla => {},
+                Loader::Fabric => {
+                    let mods = std::env::join_paths(self.add_mods).unwrap();
+
+                    stdin_arguments.push_str("property\n");
+                    stdin_arguments.push_str("fabric.addMods\n");
+                    stdin_arguments.push_str(&mods.to_string_lossy());
+                    stdin_arguments.push('\n');
+                },
+                _ => {
+                    if cfg!(debug_assertions) {
+                        panic!("addMods was used for unsupported loader: {:?}", self.configuration.loader);
+                    }
+                }
             }
         }
 
@@ -1526,6 +2089,14 @@ impl LaunchContext {
     fn resolve_expansion(&self, key: ArgumentExpansionKey) -> Cow<'_, OsStr> {
         match key {
             ArgumentExpansionKey::NativesDirectory => self.natives_dir.as_os_str().into(),
+            ArgumentExpansionKey::LibrariesDirectory => self.libraries_dir.as_os_str().into(),
+            ArgumentExpansionKey::ClasspathSeparator => if cfg!(unix) {
+                OsStr::new(":").into()
+            } else if cfg!(windows) {
+                OsStr::new(";").into()
+            } else {
+                panic!("Unsupported platform")
+            },
             ArgumentExpansionKey::LauncherName => OsStr::new("PandoraLauncher").into(),
             ArgumentExpansionKey::LauncherVersion => OsStr::new("1.0.0").into(),
             ArgumentExpansionKey::Classpath => std::env::join_paths(&self.classpath).unwrap().into(),
@@ -1583,4 +2154,29 @@ fn path_is_normal(path: impl AsRef<Path>) -> bool {
     }
 
     true
+}
+
+fn expand_forge_argument<'a>(argument: &'a str, map: &FxHashMap<String, OsString>) -> Cow<'a, OsStr> {
+    let mut builder = OsString::new();
+    let mut copied_to_builder = 0;
+    for (i, character) in argument.char_indices() {
+        if character == '{' {
+            let remaining = &argument[i..];
+            if let Some(end) = remaining.find('}') {
+                let to_expand = &argument[i+1..i+end];
+                if let Some(expanded) = map.get(to_expand) {
+                    builder.push(&argument[copied_to_builder..i]);
+                    builder.push(expanded);
+                    copied_to_builder = i+end+1;
+                } else {
+                    panic!("Unsupported argument: {:?}", to_expand);
+                }
+            }
+        }
+    }
+    if !builder.is_empty() {
+        builder.push(&argument[copied_to_builder..]);
+        return Cow::Owned(builder);
+    }
+    Cow::Borrowed(OsStr::new(argument))
 }

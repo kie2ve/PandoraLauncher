@@ -8,7 +8,7 @@ use bridge::{
     modal_action::ModalAction,
 };
 use gpui::{prelude::*, *};
-use gpui_component::{breadcrumb::Breadcrumb, scroll::ScrollableElement, v_flex, Root};
+use gpui_component::{breadcrumb::Breadcrumb, scroll::{ScrollableElement, ScrollbarAxis}, v_flex, Root, StyledExt};
 
 use crate::{MAIN_FONT, entity::DataEntities, modals, ui::{LauncherUI, PageType}};
 
@@ -46,6 +46,7 @@ impl LauncherRoot {
 
 impl Render for LauncherRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+
         if let Some(message) = &*self.deadlock_message.read().unwrap() {
             let purple = Hsla {
                 h: 0.8333333333,

@@ -1,14 +1,11 @@
 use std::{
-    collections::{HashMap, VecDeque},
-    fmt::Display,
-    path::Path,
-    sync::Arc, time::{Duration, Instant},
+    collections::{HashMap, VecDeque}, fmt::Display, path::Path, sync::Arc, time::{Duration, Instant}
 };
 
 use bridge::keep_alive::{KeepAlive, KeepAliveHandle};
 use reqwest::StatusCode;
 use schema::{
-    assets_index::AssetsIndex, fabric_launch::FabricLaunch, fabric_loader_manifest::FabricLoaderManifest, java_runtime_component::JavaRuntimeComponentManifest, java_runtimes::JavaRuntimes, modrinth::{ModrinthProjectVersionsResult, ModrinthSearchRequest, ModrinthSearchResult, ModrinthVersionFileUpdateResult}, version::MinecraftVersion, version_manifest::MinecraftVersionManifest
+    assets_index::AssetsIndex, fabric_launch::FabricLaunch, fabric_loader_manifest::FabricLoaderManifest, java_runtime_component::JavaRuntimeComponentManifest, java_runtimes::JavaRuntimes, maven::MavenMetadataXml, modrinth::{ModrinthProjectVersionsResult, ModrinthSearchRequest, ModrinthSearchResult, ModrinthVersionFileUpdateResult}, version::MinecraftVersion, version_manifest::MinecraftVersionManifest
 };
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
@@ -26,6 +23,8 @@ pub struct MetadataManagerStates {
     pub(super) minecraft_version_manifest: MetaLoadStateWrapper<MinecraftVersionManifest>,
     pub(super) mojang_java_runtimes: MetaLoadStateWrapper<JavaRuntimes>,
     pub(super) fabric_loader_manifest: MetaLoadStateWrapper<FabricLoaderManifest>,
+    pub(super) neoforge_installer_maven_manifest: MetaLoadStateWrapper<MavenMetadataXml>,
+    pub(super) forge_installer_maven_manifest: MetaLoadStateWrapper<MavenMetadataXml>,
     pub(super) fabric_launch: HashMap<(Ustr, Ustr), MetaLoadStateWrapper<FabricLaunch>>,
     pub(super) version_info: HashMap<Ustr, MetaLoadStateWrapper<MinecraftVersion>>,
     pub(super) assets_index: HashMap<Ustr, MetaLoadStateWrapper<AssetsIndex>>,
@@ -42,6 +41,8 @@ pub struct MetadataManager {
     pub(super) version_manifest_cache: Arc<Path>,
     pub(super) mojang_java_runtimes_cache: Arc<Path>,
     pub(super) fabric_loader_manifest_cache: Arc<Path>,
+    pub(super) neoforge_installer_maven_cache: Arc<Path>,
+    pub(super) forge_installer_maven_cache: Arc<Path>,
 
     expiring: tokio::sync::Mutex<VecDeque<(Instant, KeepAlive)>>,
 
@@ -53,6 +54,7 @@ pub enum MetaLoadError {
     InvalidHash,
     Reqwest(Arc<reqwest::Error>),
     SerdeJson(Arc<serde_json::Error>),
+    SerdeXml(Arc<serde_xml_rs::Error>),
     TokioJoin(Arc<tokio::task::JoinError>),
     Error(Arc<str>),
     ErrorWithDescription(Arc<str>, Arc<str>),
@@ -89,7 +91,10 @@ impl Display for MetaLoadError {
                 f.debug_tuple("Reqwest").field(error).finish()
             },
             Self::SerdeJson(_) => {
-                f.write_str("Data was missing or malformed")
+                f.write_str("Json data was missing or malformed")
+            }
+            Self::SerdeXml(_) => {
+                f.write_str("XML data was missing or malformed")
             }
             Self::Error(error) => {
                 f.write_fmt(format_args!("{}", *error))
@@ -117,6 +122,12 @@ impl From<serde_json::Error> for MetaLoadError {
     }
 }
 
+impl From<serde_xml_rs::Error> for MetaLoadError {
+    fn from(error: serde_xml_rs::Error) -> Self {
+        Self::SerdeXml(Arc::new(error))
+    }
+}
+
 impl From<tokio::task::JoinError> for MetaLoadError {
     fn from(error: tokio::task::JoinError) -> Self {
         Self::TokioJoin(Arc::new(error))
@@ -140,6 +151,8 @@ impl MetadataManager {
             version_manifest_cache: directory.join("version_manifest.json").into(),
             mojang_java_runtimes_cache: directory.join("mojang_java_runtimes.json").into(),
             fabric_loader_manifest_cache: directory.join("fabric_loader_manifest.json").into(),
+            neoforge_installer_maven_cache: directory.join("neoforge_installer_maven.xml").into(),
+            forge_installer_maven_cache: directory.join("forge_installer_maven.xml").into(),
             metadata_cache: directory,
 
             expiring: Default::default(),
@@ -273,7 +286,7 @@ impl MetadataManager {
                         return None;
                     }
 
-                    let result: Result<I::T, serde_json::Error> = serde_json::from_slice(&file);
+                    let result = I::deserialize(&file);
                     match result {
                         Ok(meta) => {
                             Some(meta)
@@ -319,10 +332,11 @@ impl MetadataManager {
                 }
 
                 let bytes = response.bytes().await?;
+                let bytes = I::post_process_download(&bytes)?;
 
                 // We try to decode before checking the hash because it's a more
                 // useful error message to know that the content is invalid
-                let meta: I::T = serde_json::from_slice(&bytes)?;
+                let meta: I::T = I::deserialize(&bytes)?;
 
                 let correct_hash = if let Some(expected_hash) = &expected_hash {
                     let mut hasher = Sha1::new();

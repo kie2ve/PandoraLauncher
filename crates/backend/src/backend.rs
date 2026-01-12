@@ -606,6 +606,16 @@ impl BackendState {
     }
 
     pub async fn prelaunch_apply_modpacks(&self, id: InstanceID, modal_action: &ModalAction) -> Vec<PathBuf> {
+        let (loader, mod_dir) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+            (instance.configuration.get().loader, instance.mods_path.clone())
+        } else {
+            return Vec::new();
+        };
+
+        if loader == Loader::Vanilla {
+            return Vec::new();
+        }
+
         let Some(mods) = self.clone().load_instance_mods(id).await else {
             return Vec::new();
         };
@@ -618,6 +628,21 @@ impl BackendState {
         struct ModpackInstall {
             hashed_downloads: Vec<HashedDownload>,
             overrides: Arc<[(SafePath, Arc<[u8]>)]>,
+        }
+
+        let loader_supports_add_mods = loader == Loader::Fabric;
+
+        // Remove .pandora.filename mods
+        if let Ok(read_dir) = std::fs::read_dir(&mod_dir) {
+            for entry in read_dir {
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                let file_name = entry.file_name();
+                if file_name.to_string_lossy().starts_with(".pandora.") {
+                    _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
 
         let mut modpack_installs = Vec::new();
@@ -696,7 +721,13 @@ impl BackendState {
                 let path = crate::create_content_library_path(content_library_dir, expected_hash, dest_path.extension());
 
                 if file.path.starts_with("mods/") && file.path.ends_with(".jar") {
-                    add_mods.push(path);
+                    if loader_supports_add_mods {
+                        add_mods.push(path);
+                    } else if let Some(filename) = dest_path.file_name() {
+                        let filename = format!(".pandora.{filename}");
+                        let hidden_dest_path = mod_dir.join(filename);
+                        let _ = std::fs::hard_link(path, hidden_dest_path);
+                    }
                 } else {
                     let dest_path = dest_path.to_path(&dot_minecraft_path);
 
@@ -714,6 +745,7 @@ impl BackendState {
 
                 let tracker = &tracker;
                 let dot_minecraft_path = &dot_minecraft_path;
+                let mod_dir = &mod_dir;
                 let futures = overrides.iter().map(|(dest_path, file)| async move {
                     let file2 = file.clone();
                     let expected_hash = tokio::task::spawn_blocking(move || {
@@ -730,7 +762,13 @@ impl BackendState {
                     }
 
                     if dest_path.starts_with("mods") && let Some(extension) = dest_path.extension() && extension == "jar" {
-                        return Some(path);
+                        if loader_supports_add_mods {
+                            return Some(path);
+                        } else if let Some(filename) = dest_path.file_name() {
+                            let filename = format!(".pandora.{filename}");
+                            let hidden_dest_path = mod_dir.join(filename);
+                            let _ = std::fs::hard_link(path, hidden_dest_path);
+                        }
                     } else {
                         let dest_path = dest_path.to_path(&dot_minecraft_path);
 

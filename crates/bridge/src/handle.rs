@@ -145,7 +145,9 @@ unsafe impl Sync for FrontendHandle {}
 impl FrontendHandle {
     pub fn send(&self, message: MessageToFrontend) {
         #[cfg(debug_assertions)]
-        self.sender.try_send((message, None)).unwrap();
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(v)) = self.sender.try_send((message, None)) {
+            panic!("Sender is full, unable to send message: {v:?}");
+        }
         #[cfg(not(debug_assertions))]
         let _ = self.sender.send((message, None));
     }
@@ -159,7 +161,9 @@ impl FrontendHandle {
         serial.set(next_serial);
 
         #[cfg(debug_assertions)]
-        self.sender.try_send((message, Some(next_serial))).unwrap();
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(v)) = self.sender.try_send((message, Some(next_serial))) {
+            panic!("Sender is full, unable to send message: {v:?}");
+        };
         #[cfg(not(debug_assertions))]
         let _ = self.sender.send((message, Some(next_serial)));
     }

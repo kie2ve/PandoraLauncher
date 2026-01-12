@@ -1,23 +1,26 @@
 use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
+    borrow::Cow, path::{Path, PathBuf}, sync::Arc
 };
 
 use reqwest::RequestBuilder;
 use schema::{
-    assets_index::AssetsIndex, fabric_launch::FabricLaunch, fabric_loader_manifest::{FabricLoaderManifest, FABRIC_LOADER_MANIFEST_URL}, java_runtime_component::JavaRuntimeComponentManifest, java_runtimes::{JavaRuntimes, JAVA_RUNTIMES_URL}, modrinth::{ModrinthLoader, ModrinthProjectVersionsRequest, ModrinthProjectVersionsResult, ModrinthSearchRequest, ModrinthSearchResult, ModrinthVersionFileUpdateResult, MODRINTH_SEARCH_URL}, version::MinecraftVersion, version_manifest::{MinecraftVersionLink, MinecraftVersionManifest, MOJANG_VERSION_MANIFEST_URL}
+    assets_index::AssetsIndex, fabric_launch::FabricLaunch, fabric_loader_manifest::{FabricLoaderManifest, FABRIC_LOADER_MANIFEST_URL}, java_runtime_component::JavaRuntimeComponentManifest, java_runtimes::{JavaRuntimes, JAVA_RUNTIMES_URL}, maven::MavenMetadataXml, modrinth::{ModrinthLoader, ModrinthProjectVersionsRequest, ModrinthProjectVersionsResult, ModrinthSearchRequest, ModrinthSearchResult, ModrinthVersionFileUpdateResult, MODRINTH_SEARCH_URL}, version::MinecraftVersion, version_manifest::{MinecraftVersionLink, MinecraftVersionManifest, MOJANG_VERSION_MANIFEST_URL}
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 use ustr::Ustr;
 
-use crate::metadata::manager::{MetaLoadStateWrapper, MetadataManager, MetadataManagerStates};
+use crate::metadata::manager::{MetaLoadError, MetaLoadStateWrapper, MetadataManager, MetadataManagerStates};
 
 pub trait MetadataItem {
-    type T: DeserializeOwned + Send + Sync + 'static;
+    type T: Send + Sync + 'static;
 
     fn request(&self, client: &reqwest::Client) -> RequestBuilder;
     fn expires(&self) -> bool;
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T>;
+    fn post_process_download(bytes: &[u8]) -> Result<Cow<'_, [u8]>, MetaLoadError> {
+        Ok(Cow::Borrowed(bytes))
+    }
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError>;
     fn cache_file(&self, _metadata_manager: &MetadataManager) -> Option<impl AsRef<Path> + Send + Sync + 'static> {
         None::<PathBuf>
     }
@@ -46,6 +49,10 @@ impl MetadataItem for MinecraftVersionManifestMetadataItem {
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.minecraft_version_manifest.clone()
     }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 pub struct MojangJavaRuntimesMetadataItem;
@@ -67,6 +74,10 @@ impl MetadataItem for MojangJavaRuntimesMetadataItem {
 
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.mojang_java_runtimes.clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -99,6 +110,10 @@ impl<'v> MetadataItem for MinecraftVersionMetadataItem<'v> {
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.version_info.entry(self.0.url).or_default().clone()
     }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 pub struct AssetsIndexMetadataItem {
@@ -128,6 +143,10 @@ impl MetadataItem for AssetsIndexMetadataItem {
 
     fn data_hash(&self) -> Option<Ustr> {
         Some(self.hash)
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -159,6 +178,10 @@ impl MetadataItem for MojangJavaRuntimeComponentMetadataItem {
     fn data_hash(&self) -> Option<Ustr> {
         Some(self.hash)
     }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 pub struct FabricLoaderManifestMetadataItem;
@@ -180,6 +203,10 @@ impl MetadataItem for FabricLoaderManifestMetadataItem {
 
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.fabric_loader_manifest.clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -210,6 +237,10 @@ impl MetadataItem for FabricLaunchMetadataItem {
         let key = (self.minecraft_version, self.loader_version);
         states.fabric_launch.entry(key).or_default().clone()
     }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 pub struct ModrinthSearchMetadataItem<'a>(pub &'a ModrinthSearchRequest);
@@ -227,6 +258,10 @@ impl<'a> MetadataItem for ModrinthSearchMetadataItem<'a> {
 
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.modrinth_search.entry(self.0.clone()).or_default().clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -247,6 +282,10 @@ impl<'a> MetadataItem for ModrinthProjectVersionsMetadataItem<'a> {
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.modrinth_project_versions.entry(self.0.project_id.clone()).or_default().clone()
     }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -260,7 +299,7 @@ pub struct ModrinthVersionUpdateMetadataItem {
     pub params: VersionUpdateParameters,
 }
 
-impl<'a> MetadataItem for ModrinthVersionUpdateMetadataItem {
+impl MetadataItem for ModrinthVersionUpdateMetadataItem {
     type T = ModrinthVersionFileUpdateResult;
 
     fn request(&self, client: &reqwest::Client) -> RequestBuilder {
@@ -274,6 +313,10 @@ impl<'a> MetadataItem for ModrinthVersionUpdateMetadataItem {
 
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.modrinth_version_updates.entry(self.sha1.clone()).or_default().clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -294,7 +337,7 @@ pub struct ModrinthV3VersionUpdateMetadataItem {
     pub params: VersionV3UpdateParameters,
 }
 
-impl<'a> MetadataItem for ModrinthV3VersionUpdateMetadataItem {
+impl MetadataItem for ModrinthV3VersionUpdateMetadataItem {
     type T = ModrinthVersionFileUpdateResult;
 
     fn request(&self, client: &reqwest::Client) -> RequestBuilder {
@@ -308,5 +351,61 @@ impl<'a> MetadataItem for ModrinthV3VersionUpdateMetadataItem {
 
     fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
         states.modrinth_version_updates.entry(self.sha1.clone()).or_default().clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
+pub struct NeoforgeInstallerMavenMetadataItem;
+
+impl MetadataItem for NeoforgeInstallerMavenMetadataItem {
+    type T = MavenMetadataXml;
+
+    fn request(&self, client: &reqwest::Client) -> RequestBuilder {
+        client.get("https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml")
+    }
+
+    fn expires(&self) -> bool {
+        true
+    }
+
+    fn cache_file(&self, metadata_manager: &MetadataManager) -> Option<impl AsRef<Path> + Send + Sync + 'static> {
+        Some(Arc::clone(&metadata_manager.neoforge_installer_maven_cache))
+    }
+
+    fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
+        states.neoforge_installer_maven_manifest.clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_xml_rs::from_reader(bytes)?)
+    }
+}
+
+pub struct ForgeInstallerMavenMetadataItem;
+
+impl MetadataItem for ForgeInstallerMavenMetadataItem {
+    type T = MavenMetadataXml;
+
+    fn request(&self, client: &reqwest::Client) -> RequestBuilder {
+        client.get("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
+    }
+
+    fn expires(&self) -> bool {
+        true
+    }
+
+    fn cache_file(&self, metadata_manager: &MetadataManager) -> Option<impl AsRef<Path> + Send + Sync + 'static> {
+        Some(Arc::clone(&metadata_manager.forge_installer_maven_cache))
+    }
+
+    fn state(&self, states: &mut MetadataManagerStates) -> MetaLoadStateWrapper<Self::T> {
+        states.forge_installer_maven_manifest.clone()
+    }
+
+    fn deserialize(bytes: &[u8]) -> Result<Self::T, MetaLoadError> {
+        Ok(serde_xml_rs::from_reader(bytes)?)
     }
 }

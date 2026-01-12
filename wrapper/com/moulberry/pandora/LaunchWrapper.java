@@ -14,6 +14,9 @@ public class LaunchWrapper {
 
             if (command.equals("arg")) {
                 arguments.add(value);
+            } else if (command.equals("property")) {
+                String propertyValue = scanner.nextLine();
+                System.setProperty(value, propertyValue);
             } else if (command.equals("launch")) {
                 String[] argumentsArray = arguments.toArray(new String[0]);
                 Class.forName(value).getDeclaredMethod("main", String[].class).invoke(null, (Object) argumentsArray);

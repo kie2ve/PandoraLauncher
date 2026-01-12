@@ -151,7 +151,7 @@ impl BackendState {
                 let launch_tracker = ProgressTracker::new(Arc::from("Launching"), self.send.clone());
                 modal_action.trackers.push(launch_tracker.clone());
 
-                let result = self.launcher.launch(&self.http_client, dot_minecraft, configuration, quick_play, login_info, add_mods, &launch_tracker, &modal_action).await;
+                let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, add_mods, &launch_tracker, &modal_action).await;
 
                 if matches!(result, Err(LaunchError::CancelledByUser)) {
                     self.send.send(MessageToFrontend::CloseModal);

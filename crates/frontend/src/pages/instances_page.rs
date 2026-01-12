@@ -347,16 +347,16 @@ impl InstancesPage {
                             .label("Fabric")
                             .selected(selected_loader_value == Loader::Fabric),
                     )
-                    // .child(
-                    //     Button::new("loader-forge")
-                    //         .label("Forge")
-                    //         .selected(selected_loader_value == Loader::Forge),
-                    // )
-                    // .child(
-                    //     Button::new("loader-neoforge")
-                    //         .label("NeoForge")
-                    //         .selected(selected_loader_value == Loader::NeoForge),
-                    // )
+                    .child(
+                        Button::new("loader-forge")
+                            .label("Forge")
+                            .selected(selected_loader_value == Loader::Forge),
+                    )
+                    .child(
+                        Button::new("loader-neoforge")
+                            .label("NeoForge")
+                            .selected(selected_loader_value == Loader::NeoForge),
+                    )
                     .on_click(move |selected, _, _| {
                         match selected.first() {
                             Some(0) => selected_loader.store(0, Ordering::Relaxed),

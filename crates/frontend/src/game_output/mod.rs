@@ -24,8 +24,6 @@ struct CachedShapedLines {
     last_time: Option<Arc<ShapedLine>>,
     last_time_millis: i64,
 
-    thread: HashMap<Arc<str>, Arc<ShapedLine>>,
-
     item_lines: LruCache<usize, WrappedLines, FxBuildHasher>,
 }
 
@@ -41,10 +39,9 @@ pub struct GameOutputItemState {
 pub struct GameOutput {
     font: Font,
     scroll_state: Rc<RefCell<GameOutputScrollState>>,
-    pending: Vec<(i64, Arc<str>, GameOutputLogLevel, Arc<[Arc<str>]>)>,
+    pending: Vec<(i64, GameOutputLogLevel, Arc<[Arc<str>]>)>,
     item_state: Option<GameOutputItemState>,
     time_column_width: Pixels,
-    thread_column_width: Pixels,
     level_column_width: Pixels,
     shaped_log_levels: Option<CachedShapedLogLevels>,
 }
@@ -69,13 +66,11 @@ impl Default for GameOutput {
                 cached_shaped_lines: CachedShapedLines {
                     last_time: None,
                     last_time_millis: 0,
-                    thread: HashMap::new(),
                     item_lines: LruCache::with_hasher(NonZeroUsize::new(256).unwrap(), FxBuildHasher),
                 },
                 search_query: SharedString::new_static(""),
             }),
             time_column_width: Default::default(),
-            thread_column_width: Default::default(),
             level_column_width: Default::default(),
             shaped_log_levels: None,
         }
@@ -83,8 +78,8 @@ impl Default for GameOutput {
 }
 
 impl GameOutput {
-    pub fn add(&mut self, time: i64, thread: Arc<str>, level: GameOutputLogLevel, text: Arc<[Arc<str>]>) {
-        self.pending.push((time, thread, level, text));
+    pub fn add(&mut self, time: i64, level: GameOutputLogLevel, text: Arc<[Arc<str>]>) {
+        self.pending.push((time, level, text));
     }
 
     fn shape_log_level(
@@ -129,7 +124,7 @@ impl GameOutput {
         let Some(item_state) = &mut self.item_state else {
             return;
         };
-        for (time, thread, level, text) in self.pending.drain(..) {
+        for (time, level, text) in self.pending.drain(..) {
             let shaped_level = match level {
                 GameOutputLogLevel::Fatal => self.shaped_log_levels.as_ref().unwrap().fatal.clone(),
                 GameOutputLogLevel::Error => self.shaped_log_levels.as_ref().unwrap().error.clone(),
@@ -155,7 +150,6 @@ impl GameOutput {
                     item_state.item_sizes.push(0);
                     item_state.items.push(GameOutputItem {
                         time: TimeShapedLine::Timestamp(time),
-                        thread: ThreadShapedLine::Thread(thread),
                         level: shaped_level.clone(),
                         text: text.clone(),
                         index: item_state.items.len(),
@@ -173,7 +167,6 @@ impl GameOutput {
             item_state.total_line_count += total_lines;
             item_state.items.push(GameOutputItem {
                 time: TimeShapedLine::Timestamp(time),
-                thread: ThreadShapedLine::Thread(thread),
                 level: shaped_level.clone(),
                 text: text.clone(),
                 index: item_state.items.len(),
@@ -196,14 +189,8 @@ enum TimeShapedLine {
     Shaped(Arc<ShapedLine>),
 }
 
-enum ThreadShapedLine {
-    Thread(Arc<str>),
-    Shaped(Arc<ShapedLine>),
-}
-
 struct GameOutputItem {
     time: TimeShapedLine,
-    thread: ThreadShapedLine,
     level: Arc<ShapedLine>,
 
     text: Arc<[Arc<str>]>,
@@ -417,7 +404,6 @@ impl Element for GameOutputList {
 
                         let text_width = bounds.size.width
                             - game_output.time_column_width
-                            - game_output.thread_column_width
                             - game_output.level_column_width;
                         let wrap_width = text_width.max(font_size * 30);
 
@@ -439,7 +425,6 @@ impl Element for GameOutputList {
                                     font_size,
                                     line_height,
                                     &mut game_output.time_column_width,
-                                    &mut game_output.thread_column_width,
                                     game_output.level_column_width,
                                     &mut item_state.item_sizes,
                                     &mut item_state.total_line_count,
@@ -460,7 +445,6 @@ impl Element for GameOutputList {
                                     font_size,
                                     line_height,
                                     &mut game_output.time_column_width,
-                                    &mut game_output.thread_column_width,
                                     game_output.level_column_width,
                                     &mut item_state.item_sizes,
                                     &mut item_state.total_line_count,
@@ -698,7 +682,6 @@ fn paint_lines<'a, const REVERSE: bool>(
     font_size: Pixels,
     line_height: Pixels,
     time_column_width: &mut Pixels,
-    thread_column_width: &mut Pixels,
     level_column_width: Pixels,
     item_sizes: &mut FenwickTree<usize>,
     total_line_count: &mut usize,
@@ -752,7 +735,7 @@ fn paint_lines<'a, const REVERSE: bool>(
         */
 
         let mut line_origin = text_origin;
-        line_origin.x += *time_column_width + *thread_column_width + level_column_width;
+        line_origin.x += *time_column_width + level_column_width;
         if REVERSE {
             for shaped in lines.iter().rev() {
                 if line_origin.y <= visible_bounds.origin.y + visible_bounds.size.height {
@@ -810,44 +793,8 @@ fn paint_lines<'a, const REVERSE: bool>(
             _ = shaped_time.paint(time_origin, line_height, TextAlign::Left, None, window, cx);
         }
 
-        // Shape thread text if needed
-        if let ThreadShapedLine::Thread(thread_name) = &item.thread {
-            if let Some(cached_thread_line) = cache.thread.get(thread_name) {
-                item.thread = ThreadShapedLine::Shaped(Arc::clone(cached_thread_line));
-            } else {
-                let thread_name = thread_name.clone();
-                let thread_run = vec![TextRun {
-                    len: thread_name.len(),
-                    font: font.clone(),
-                    color: text_style.color,
-                    background_color: text_style.background_color,
-                    underline: text_style.underline,
-                    strikethrough: text_style.strikethrough,
-                }];
-
-                let mut line_wrapper = window.text_system().line_wrapper(font.clone(), font_size);
-                let (truncated, thread_run) = line_wrapper.truncate_line(thread_name.clone().into(), px(150.0), "…", &thread_run, TruncateFrom::Start);
-
-                let shaped_thread_name =
-                    Arc::new(window.text_system().shape_line(truncated, font_size, &thread_run, None));
-
-                item.thread = ThreadShapedLine::Shaped(Arc::clone(&shaped_thread_name));
-
-                *thread_column_width = (*thread_column_width).max(shaped_thread_name.width + font_size / 2.0);
-
-                cache.thread.insert(thread_name, shaped_thread_name);
-            }
-        }
-
-        // Render thread text
-        if let ThreadShapedLine::Shaped(shaped_thread) = &item.thread {
-            let mut thread_origin = time_origin;
-            thread_origin.x += *time_column_width + *thread_column_width - shaped_thread.width - font_size / 2.0;
-            _ = shaped_thread.paint(thread_origin, line_height, TextAlign::Left, None, window, cx);
-        }
-
         let mut level_origin = time_origin;
-        level_origin.x += *time_column_width + *thread_column_width + level_column_width - item.level.width - font_size/2.0;
+        level_origin.x += *time_column_width + level_column_width - item.level.width - font_size/2.0;
         _ = item.level.paint(level_origin, line_height, TextAlign::Left, None, window, cx);
 
         if line_count != item.total_lines {
