@@ -105,3 +105,12 @@ pub enum ContentUpdateStatus {
     AlreadyUpToDate,
     Modrinth,
 }
+
+impl ContentUpdateStatus {
+    pub fn can_update(&self) -> bool {
+        match self {
+            ContentUpdateStatus::Modrinth => true,
+            _ => false,
+        }
+    }
+}

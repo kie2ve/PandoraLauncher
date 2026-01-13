@@ -5,6 +5,7 @@ use bridge::{
     install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{InstanceStatus, LoaderSpecificModSummary, ModSummary}, message::{LogFiles, MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, serial::AtomicOptionSerial
 };
 use futures::TryFutureExt;
+use rustc_hash::{FxHashMap, FxHashSet};
 use schema::{content::ContentSource, modrinth::ModrinthLoader, version::{LaunchArgument, LaunchArgumentValue}};
 use serde::Deserialize;
 use tokio::{io::AsyncBufReadExt, sync::Semaphore};
@@ -194,25 +195,33 @@ impl BackendState {
                 return;
 
             },
-            MessageToBackend::SetModEnabled { id, mod_id, enabled } => {
+            MessageToBackend::SetModEnabled { id, mod_ids, enabled } => {
                 let mut instance_state = self.instance_state.write();
-                if let Some(instance) = instance_state.instances.get_mut(id)
-                    && let Some(instance_mod) = instance.try_get_mod(mod_id)
-                {
-                    if instance_mod.enabled == enabled {
-                        return;
+                let Some(instance) = instance_state.instances.get_mut(id) else {
+                    return;
+                };
+
+                let mut reload = FxHashSet::default();
+
+                for mod_id in mod_ids {
+                    if let Some(instance_mod) = instance.try_get_mod(mod_id) {
+                        if instance_mod.enabled == enabled {
+                            return;
+                        }
+
+                        let mut new_path = instance_mod.path.to_path_buf();
+                        if instance_mod.enabled {
+                            new_path.add_extension("disabled");
+                        } else {
+                            new_path.set_extension("");
+                        };
+
+                        let _ = std::fs::rename(&instance_mod.path, new_path);
+                        reload.insert(id);
                     }
-
-                    let mut new_path = instance_mod.path.to_path_buf();
-                    if instance_mod.enabled {
-                        new_path.add_extension("disabled");
-                    } else {
-                        new_path.set_extension("");
-                    };
-
-                    let _ = std::fs::rename(&instance_mod.path, new_path);
-                    instance_state.reload_mods_immediately.insert(id);
                 }
+
+                instance_state.reload_mods_immediately.extend(reload);
             },
             MessageToBackend::SetModChildEnabled { id, mod_id, path, enabled } => {
                 let mut instance_state = self.instance_state.write();
@@ -242,20 +251,26 @@ impl BackendState {
                 modal_action.set_finished();
                 self.send.send(MessageToFrontend::Refresh);
             },
-            MessageToBackend::DeleteMod { id, mod_id } => {
+            MessageToBackend::DeleteMod { id, mod_ids } => {
                 let mut instance_state = self.instance_state.write();
                 let Some(instance) = instance_state.instances.get_mut(id) else {
                     self.send.send_error("Unable to find instance, unknown id");
                     return;
                 };
 
-                let Some(instance_mod) = instance.try_get_mod(mod_id) else {
-                    self.send.send_error("Unable to delete mod, invalid id");
-                    return;
-                };
+                let mut reload = FxHashSet::default();
 
-                let _ = std::fs::remove_file(&instance_mod.path);
-                instance_state.reload_mods_immediately.insert(id);
+                for mod_id in mod_ids {
+                    let Some(instance_mod) = instance.try_get_mod(mod_id) else {
+                        self.send.send_error("Unable to delete mod, invalid id");
+                        return;
+                    };
+
+                    let _ = std::fs::remove_file(&instance_mod.path);
+                    reload.insert(id);
+                }
+
+                instance_state.reload_mods_immediately.extend(reload);
             },
             MessageToBackend::UpdateCheck { instance: id, modal_action } => {
                 let (loader, version) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {

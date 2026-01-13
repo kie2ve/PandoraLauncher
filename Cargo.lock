@@ -2426,6 +2426,7 @@ dependencies = [
  "lru",
  "once_cell",
  "open",
+ "parking_lot",
  "rand 0.8.5",
  "relative-path",
  "reqwest_client",

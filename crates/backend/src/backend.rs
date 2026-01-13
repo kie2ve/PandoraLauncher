@@ -14,7 +14,7 @@ use bridge::{
 };
 use parking_lot::RwLock;
 use reqwest::{StatusCode, redirect::Policy};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use schema::{instance::InstanceConfiguration, loader::Loader, modrinth::ModrinthSideRequirement};
 use sha1::{Digest, Sha1};
 use tokio::sync::{mpsc::Receiver, OnceCell};
@@ -64,7 +64,7 @@ pub fn start(launcher_dir: PathBuf, send: FrontendHandle, self_handle: BackendHa
         instances: IdSlab::default(),
         instance_by_path: HashMap::new(),
         instances_generation: 0,
-        reload_mods_immediately: HashSet::new(),
+        reload_mods_immediately: FxHashSet::default(),
     };
 
     let mut state_file_watching = BackendStateFileWatching {
@@ -126,7 +126,7 @@ pub struct BackendStateInstances {
     pub instances: IdSlab<Instance>,
     pub instance_by_path: HashMap<PathBuf, InstanceID>,
     pub instances_generation: usize,
-    pub reload_mods_immediately: HashSet<InstanceID>,
+    pub reload_mods_immediately: FxHashSet<InstanceID>,
 }
 
 pub struct BackendStateFileWatching {

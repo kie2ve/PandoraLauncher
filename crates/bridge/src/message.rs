@@ -60,7 +60,7 @@ pub enum MessageToBackend {
     },
     SetModEnabled {
         id: InstanceID,
-        mod_id: InstanceModID,
+        mod_ids: Vec<InstanceModID>,
         enabled: bool,
     },
     SetModChildEnabled {
@@ -71,7 +71,7 @@ pub enum MessageToBackend {
     },
     DeleteMod {
         id: InstanceID,
-        mod_id: InstanceModID,
+        mod_ids: Vec<InstanceModID>,
     },
     InstallContent {
         content: ContentInstall,
