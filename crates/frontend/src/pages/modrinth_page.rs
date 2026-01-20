@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::{atomic::AtomicBool, Arc}, time::Duration};
 
-use bridge::{instance::{AtomicContentUpdateStatus, ContentUpdateStatus, InstanceID, InstanceModID, InstanceModSummary}, message::MessageToBackend, meta::MetadataRequest, modal_action::ModalAction};
+use bridge::{instance::{AtomicContentUpdateStatus, ContentUpdateStatus, InstanceID, InstanceContentID, InstanceContentSummary}, message::MessageToBackend, meta::MetadataRequest, modal_action::ModalAction};
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Icon, IconName, Selectable, StyledExt, WindowExt, breadcrumb::Breadcrumb, button::{Button, ButtonGroup, ButtonVariant, ButtonVariants}, checkbox::Checkbox, h_flex, input::{Input, InputEvent, InputState}, notification::NotificationType, scroll::{ScrollableElement, Scrollbar}, skeleton::Skeleton, tooltip::Tooltip, v_flex
@@ -40,7 +40,7 @@ pub struct ModrinthSearchPage {
 }
 
 struct InstalledMod {
-    mod_id: InstanceModID,
+    mod_id: InstanceContentID,
     status: Arc<AtomicContentUpdateStatus>,
 }
 
@@ -65,7 +65,7 @@ impl ModrinthSearchPage {
                     let installed = installed_mods_by_project.entry(project.clone()).or_default();
                     installed.push(InstalledMod {
                         mod_id: summary.id,
-                        status: summary.mod_summary.update_status.clone(),
+                        status: summary.content_summary.update_status.clone(),
                     })
                 }
             }
@@ -439,9 +439,9 @@ impl ModrinthSearchPage {
                                             PrimaryAction::Update(ref ids) => {
                                                 for id in ids {
                                                     let modal_action = ModalAction::default();
-                                                    data.backend_handle.send(MessageToBackend::UpdateMod {
+                                                    data.backend_handle.send(MessageToBackend::UpdateContent {
                                                         instance: install_for.unwrap(),
-                                                        mod_id: *id,
+                                                        content_id: *id,
                                                         modal_action: modal_action.clone()
                                                     });
                                                     crate::modals::generic::show_notification(window, cx,
@@ -583,7 +583,7 @@ enum PrimaryAction {
     CheckForUpdates,
     ErrorCheckingForUpdates,
     UpToDate,
-    Update(Vec<InstanceModID>),
+    Update(Vec<InstanceContentID>),
 }
 
 impl PrimaryAction {

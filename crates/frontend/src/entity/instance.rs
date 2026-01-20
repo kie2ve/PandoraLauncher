@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use bridge::{
-    instance::{InstanceID, InstanceModSummary, InstanceServerSummary, InstanceStatus, InstanceWorldSummary},
+    instance::{InstanceID, InstanceContentSummary, InstanceServerSummary, InstanceStatus, InstanceWorldSummary},
     message::AtomicBridgeDataLoadState,
 };
 use gpui::{prelude::*, *};
@@ -23,6 +23,7 @@ impl InstanceEntries {
         worlds_state: Arc<AtomicBridgeDataLoadState>,
         servers_state: Arc<AtomicBridgeDataLoadState>,
         mods_state: Arc<AtomicBridgeDataLoadState>,
+        resource_packs_state: Arc<AtomicBridgeDataLoadState>,
         cx: &mut App,
     ) {
         entity.update(cx, |entries, cx| {
@@ -38,6 +39,8 @@ impl InstanceEntries {
                 servers: cx.new(|_| [].into()),
                 mods_state,
                 mods: cx.new(|_| [].into()),
+                resource_packs_state,
+                resource_packs: cx.new(|_| [].into()),
             };
 
             entries.entries.insert_before(0, id, cx.new(|_| instance.clone()));
@@ -131,12 +134,25 @@ impl InstanceEntries {
         });
     }
 
-    pub fn set_mods(entity: &Entity<Self>, id: InstanceID, mods: Arc<[InstanceModSummary]>, cx: &mut App) {
+    pub fn set_mods(entity: &Entity<Self>, id: InstanceID, mods: Arc<[InstanceContentSummary]>, cx: &mut App) {
         entity.update(cx, |entries, cx| {
             if let Some(instance) = entries.entries.get_mut(&id) {
                 instance.update(cx, |instance, cx| {
                     instance.mods.update(cx, |existing_mods, cx| {
                         *existing_mods = mods;
+                        cx.notify();
+                    })
+                });
+            }
+        });
+    }
+
+    pub fn set_resource_packs(entity: &Entity<Self>, id: InstanceID, resource_packs: Arc<[InstanceContentSummary]>, cx: &mut App) {
+        entity.update(cx, |entries, cx| {
+            if let Some(instance) = entries.entries.get_mut(&id) {
+                instance.update(cx, |instance, cx| {
+                    instance.resource_packs.update(cx, |existing_resource_packs, cx| {
+                        *existing_resource_packs = resource_packs;
                         cx.notify();
                     })
                 });
@@ -169,7 +185,9 @@ pub struct InstanceEntry {
     pub servers_state: Arc<AtomicBridgeDataLoadState>,
     pub servers: Entity<Arc<[InstanceServerSummary]>>,
     pub mods_state: Arc<AtomicBridgeDataLoadState>,
-    pub mods: Entity<Arc<[InstanceModSummary]>>,
+    pub mods: Entity<Arc<[InstanceContentSummary]>>,
+    pub resource_packs_state: Arc<AtomicBridgeDataLoadState>,
+    pub resource_packs: Entity<Arc<[InstanceContentSummary]>>,
 }
 
 impl SelectItem for InstanceEntry {
