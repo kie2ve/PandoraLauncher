@@ -190,6 +190,19 @@ pub fn start(
 }
 
 pub fn open_main_window(data: &DataEntities, cx: &mut App) -> AnyWindowHandle {
+    let window_bounds = match InterfaceConfig::get(cx).main_window_bounds {
+        interface_config::WindowBounds::Inherit => None,
+        interface_config::WindowBounds::Windowed { x, y, w, h } => {
+            Some(WindowBounds::Windowed(Bounds::new(Point::new(px(x), px(y)), Size::new(px(w), px(h)))))
+        },
+        interface_config::WindowBounds::Maximized { x, y, w, h } => {
+            Some(WindowBounds::Maximized(Bounds::new(Point::new(px(x), px(y)), Size::new(px(w), px(h)))))
+        },
+        interface_config::WindowBounds::Fullscreen { x, y, w, h } => {
+            Some(WindowBounds::Fullscreen(Bounds::new(Point::new(px(x), px(y)), Size::new(px(w), px(h)))))
+        },
+    };
+
     let handle = cx.open_window(
         WindowOptions {
             app_id: Some("PandoraLauncher".into()),
@@ -198,13 +211,61 @@ pub fn open_main_window(data: &DataEntities, cx: &mut App) -> AnyWindowHandle {
                 title: Some(SharedString::new_static("Pandora")),
                 ..Default::default()
             }),
+            window_bounds,
             window_decorations: Some(WindowDecorations::Server),
             ..Default::default()
         },
         |window, cx| {
             window.set_window_title("Pandora");
 
-            let launcher_root = cx.new(|cx| LauncherRoot::new(&data, window, cx));
+            let launcher_root = cx.new(|cx| {
+                cx.observe_window_bounds(window, move |_, window, cx| {
+                    let origin = window.bounds().origin;
+                    let size = window.viewport_size();
+                    let new_bounds = (
+                        origin.x.to_f64() as f32, origin.y.to_f64() as f32,
+                        size.width.to_f64() as f32, size.height.to_f64() as f32
+                    );
+
+                    let old_window_bounds = InterfaceConfig::get(cx).main_window_bounds.clone();
+                    let old_bounds = match old_window_bounds {
+                        interface_config::WindowBounds::Inherit => new_bounds,
+                        interface_config::WindowBounds::Windowed { x, y, w, h } => (x, y, w, h),
+                        interface_config::WindowBounds::Maximized { x, y, w, h } => (x, y, w, h),
+                        interface_config::WindowBounds::Fullscreen { x, y, w, h } => (x, y, w, h),
+                    };
+
+                    let new_window_bounds = if window.is_fullscreen() {
+                        interface_config::WindowBounds::Fullscreen {
+                            x: old_bounds.0,
+                            y: old_bounds.1,
+                            w: old_bounds.2,
+                            h: old_bounds.3
+                        }
+                    } else if window.is_maximized() {
+                        interface_config::WindowBounds::Maximized {
+                            x: old_bounds.0,
+                            y: old_bounds.1,
+                            w: old_bounds.2,
+                            h: old_bounds.3
+                        }
+                    } else {
+                        interface_config::WindowBounds::Windowed {
+                            x: new_bounds.0,
+                            y: new_bounds.1,
+                            w: new_bounds.2,
+                            h: new_bounds.3
+                        }
+                    };
+
+                    if new_window_bounds != old_window_bounds {
+                        InterfaceConfig::get_mut(cx).main_window_bounds = new_window_bounds;
+                    }
+                }).detach();
+
+                LauncherRoot::new(&data, window, cx)
+            });
+
             cx.set_global(LauncherRootGlobal {
                 root: launcher_root.clone(),
             });

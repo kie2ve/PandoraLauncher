@@ -20,6 +20,8 @@ pub struct InterfaceConfig {
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub active_theme: SharedString,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
+    pub main_window_bounds: WindowBounds,
+    #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub main_page: SerializedPageType,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub page_path: Vec<SerializedPageType>,
@@ -33,6 +35,31 @@ pub struct InterfaceConfig {
     pub modrinth_page_project_type: ModrinthProjectType,
     #[serde(default, deserialize_with = "schema::try_deserialize")]
     pub hide_main_window_on_launch: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowBounds {
+    #[default]
+    Inherit,
+    Windowed {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    Maximized {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    Fullscreen {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
 }
 
 impl InterfaceConfig {
