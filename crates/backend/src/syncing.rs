@@ -4,23 +4,14 @@ use bridge::message::SyncState;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use rustc_hash::FxHashMap;
-use schema::backend_config::SyncTarget;
+use schema::{backend_config::SyncTarget, syncing::{ChildrenSync, CopyDeleteSync, CopySaveSync, CustomScriptSync, SymlinkSync}};
 use strum::IntoEnumIterator;
 
 use crate::directories::LauncherDirectories;
 
-struct SyncLink {
-    source: Box<Path>,
-    target: Box<Path>
-}
-
 trait Syncer {
     fn link(&self);
     fn unlink(&self);
-}
-
-struct SymlinkSync {
-    link: SyncLink
 }
 
 impl Syncer for SymlinkSync {
@@ -33,10 +24,6 @@ impl Syncer for SymlinkSync {
     }
 }
 
-struct CopySaveSync {
-    link: SyncLink
-}
-
 impl Syncer for CopySaveSync {
     fn link(&self) {
         _ = std::fs::copy(&self.link.source, &self.link.target);
@@ -45,10 +32,6 @@ impl Syncer for CopySaveSync {
     fn unlink(&self) {
         _ = std::fs::copy(&self.link.target, &self.link.source);
     }
-}
-
-struct CopyDeleteSync {
-    link: SyncLink
 }
 
 impl Syncer for CopyDeleteSync {
@@ -61,30 +44,23 @@ impl Syncer for CopyDeleteSync {
     }
 }
 
-struct ChildrenSync {
-    link: SyncLink,
-    keep_name: bool
-}
+fn source_to_target_path(sync: &ChildrenSync, source_path: &Path) -> Option<PathBuf> {
+    let name = source_path.file_name().unwrap_or_else(|| OsStr::new(""));
+    let target_base_path = sync.link.target.join(&name);
 
-impl ChildrenSync {
-    fn source_to_target_path(&self, source_path: &Path) -> Option<PathBuf> {
-        let name = source_path.file_name().unwrap_or_else(|| OsStr::new(""));
-        let target_base_path = self.link.target.join(&name);
-        
-        if self.keep_name {
-            if target_base_path.try_exists().unwrap_or(true) { return None; }
-            return Some(target_base_path)
-        } else {
-            let mut err_count: u8 = 0;
-            loop {
-                if err_count == 255 { return None; }
-                
-                let number = rand::random::<u32>();
-                let target_path = target_base_path.with_added_extension(format!("{number:0>8x}.plsync"));
-                
-                if !target_path.try_exists().unwrap_or(true) { return Some(target_path); }
-                err_count += 1;
-            }
+    if sync.keep_name {
+        if target_base_path.try_exists().unwrap_or(true) { return None; }
+        return Some(target_base_path)
+    } else {
+        let mut err_count: u8 = 0;
+        loop {
+            if err_count == 255 { return None; }
+
+            let number = rand::random::<u32>();
+            let target_path = target_base_path.with_added_extension(format!("{number:0>8x}.plsync"));
+
+            if !target_path.try_exists().unwrap_or(true) { return Some(target_path); }
+            err_count += 1;
         }
     }
 }
@@ -96,7 +72,7 @@ impl Syncer for ChildrenSync {
         let Ok(dir) = self.link.source.read_dir() else { return; };
         for entry in dir.flatten() {
             let source_path = entry.path();
-            let Some(target_path) = self.source_to_target_path(&source_path) else { continue };
+            let Some(target_path) = source_to_target_path(self, &source_path) else { continue };
             
             _ = linking::link(&source_path, &target_path);
         }
@@ -144,10 +120,6 @@ impl Syncer for ChildrenSync {
             _ = std::fs::remove_file(target_path);
         }
     }
-}
-
-struct CustomScriptSync {
-    link: SyncLink
 }
 
 impl Syncer for CustomScriptSync {

@@ -19,6 +19,7 @@ pub mod mrpack;
 pub mod resourcepack;
 pub mod version;
 pub mod version_manifest;
+pub mod syncing;
 
 pub fn try_deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
