@@ -19,8 +19,8 @@ pub enum SyncType {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SyncEntry {
-    enabled: bool,
-    sync: SyncType,
+    pub enabled: bool,
+    pub sync: SyncType,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

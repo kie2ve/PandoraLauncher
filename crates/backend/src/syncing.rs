@@ -1,54 +1,101 @@
-use std::{collections::HashSet, ffi::OsStr, path::{Path, PathBuf}, sync::Arc, time::SystemTime};
+use std::{collections::HashSet, ffi::OsStr, fmt::Debug, path::{Component, Path, PathBuf}, sync::Arc, time::SystemTime};
 
 use bridge::message::SyncState;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use rustc_hash::FxHashMap;
-use schema::{backend_config::SyncTarget, syncing::{ChildrenSync, CopyDeleteSync, CopySaveSync, CustomScriptSync, SymlinkSync}};
+use schema::{backend_config::SyncTarget, syncing::{ChildrenSync, CopyDeleteSync, CopySaveSync, CustomScriptSync, SymlinkSync, SyncLink, SyncType}};
 use strum::IntoEnumIterator;
 
 use crate::directories::LauncherDirectories;
 
-trait Syncer {
-    fn link(&self);
-    fn unlink(&self);
+pub trait Syncer: Debug + Send + Sync {
+    fn link_inner(&self, source: PathBuf, target: PathBuf);
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf);
+    fn get_link(&self) -> &SyncLink;
+}
+
+impl dyn Syncer {
+    pub fn link(&self, source_prefix: &Path, target_prefix: &Path) {
+        let Some(source) = to_absolute_path(source_prefix, &self.get_link().source) else { return; };
+        let Some(target) = to_absolute_path(target_prefix, &self.get_link().target) else { return; };
+        self.link_inner(source, target);
+    }
+
+    pub fn unlink(&self, source_prefix: &Path, target_prefix: &Path) {
+        let Some(source) = to_absolute_path(source_prefix, &self.get_link().source) else { return; };
+        let Some(target) = to_absolute_path(target_prefix, &self.get_link().target) else { return; };
+        self.unlink_inner(source, target);
+    }
+}
+
+impl Into<Box<dyn Syncer>> for SyncType {
+    fn into(self) -> Box<dyn Syncer> {
+        match self {
+            SyncType::Symlink(sync) => Box::new(sync),
+            SyncType::CopySave(sync) => Box::new(sync),
+            SyncType::CopyDelete(sync) => Box::new(sync),
+            SyncType::Children(sync) => Box::new(sync),
+            SyncType::CustomScript(sync) => Box::new(sync),
+        }
+    }
+}
+
+fn to_absolute_path(prefix: &Path, suffix: &Path) -> Option<PathBuf> {
+    if !suffix.is_relative() { return None; }
+    if !prefix.is_absolute() { return None; }
+    if suffix.components().any(|c| c == Component::ParentDir) { return None; }
+
+    return Some(prefix.join(suffix))
 }
 
 impl Syncer for SymlinkSync {
-    fn link(&self) {
-        _ = linking::link(&self.link.source, &self.link.target);
+    fn link_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = linking::link(&source, &target);
     }
 
-    fn unlink(&self) {
-        _ = linking::unlink_if_targeting(&self.link.source, &self.link.target);
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = linking::unlink_if_targeting(&source, &target);
+    }
+
+    fn get_link(&self) -> &SyncLink {
+        &self.link
     }
 }
 
 impl Syncer for CopySaveSync {
-    fn link(&self) {
-        _ = std::fs::copy(&self.link.source, &self.link.target);
+    fn link_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = std::fs::copy(&source, &target);
     }
 
-    fn unlink(&self) {
-        _ = std::fs::copy(&self.link.target, &self.link.source);
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = std::fs::copy(&target, &source);
+    }
+
+    fn get_link(&self) -> &SyncLink {
+        &self.link
     }
 }
 
 impl Syncer for CopyDeleteSync {
-    fn link(&self) {
-        _ = std::fs::copy(&self.link.source, &self.link.target);
+    fn link_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = std::fs::copy(&source, &target);
     }
 
-    fn unlink(&self) {
-        _ = std::fs::remove_file(&self.link.target);
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf) {
+        _ = std::fs::remove_file(&target);
+    }
+
+    fn get_link(&self) -> &SyncLink {
+        &self.link
     }
 }
 
-fn source_to_target_path(sync: &ChildrenSync, source_path: &Path) -> Option<PathBuf> {
+fn source_to_target_path(keep_name: bool, source_path: &Path, link_target: &Path) -> Option<PathBuf> {
     let name = source_path.file_name().unwrap_or_else(|| OsStr::new(""));
-    let target_base_path = sync.link.target.join(&name);
+    let target_base_path = link_target.join(&name);
 
-    if sync.keep_name {
+    if keep_name {
         if target_base_path.try_exists().unwrap_or(true) { return None; }
         return Some(target_base_path)
     } else {
@@ -66,29 +113,29 @@ fn source_to_target_path(sync: &ChildrenSync, source_path: &Path) -> Option<Path
 }
 
 impl Syncer for ChildrenSync {
-    fn link(&self) {
-        if !self.link.source.is_dir() || !self.link.target.is_dir() { return; }
-        
-        let Ok(dir) = self.link.source.read_dir() else { return; };
+    fn link_inner(&self, source: PathBuf, target: PathBuf) {
+        if !source.is_dir() || !target.is_dir() { return; }
+
+        let Ok(dir) = source.read_dir() else { return; };
         for entry in dir.flatten() {
             let source_path = entry.path();
-            let Some(target_path) = source_to_target_path(self, &source_path) else { continue };
-            
+            let Some(target_path) = source_to_target_path(self.keep_name, &source_path, &target) else { continue };
+
             _ = linking::link(&source_path, &target_path);
         }
     }
 
-    fn unlink(&self) {
-        if !self.link.source.is_dir() || !self.link.target.is_dir() { return; }
-        
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf) {
+        if !source.is_dir() || !target.is_dir() { return; }
+
         let mut sources: HashSet<PathBuf> = HashSet::new();
-        
-        let Ok(dir) = self.link.source.read_dir() else { return; };
+
+        let Ok(dir) = source.read_dir() else { return; };
         for entry in dir.flatten() {
             sources.insert(entry.path());
         }
-        
-        let Ok(dir) = self.link.target.read_dir() else { return; };
+
+        let Ok(dir) = target.read_dir() else { return; };
         for entry in dir.flatten() {
             let target_path = entry.path();
 
@@ -120,15 +167,23 @@ impl Syncer for ChildrenSync {
             _ = std::fs::remove_file(target_path);
         }
     }
+
+    fn get_link(&self) -> &SyncLink {
+        &self.link
+    }
 }
 
 impl Syncer for CustomScriptSync {
-    fn link(&self) {
+    fn link_inner(&self, source: PathBuf, target: PathBuf) {
         todo!()
     }
 
-    fn unlink(&self) {
+    fn unlink_inner(&self, source: PathBuf, target: PathBuf) {
         todo!()
+    }
+
+    fn get_link(&self) -> &SyncLink {
+        &self.link
     }
 }
 

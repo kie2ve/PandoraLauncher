@@ -141,7 +141,7 @@ impl BackendState {
                             self.send.send_error("Failed to kill instance");
                             log::error!("Failed to kill instance: {:?}", result.unwrap_err());
                         }
-
+                        self.on_instance_death(instance);
                         self.send.send(instance.create_modify_message());
                     } else {
                         self.send.send_error("Can't kill instance, instance wasn't running");
